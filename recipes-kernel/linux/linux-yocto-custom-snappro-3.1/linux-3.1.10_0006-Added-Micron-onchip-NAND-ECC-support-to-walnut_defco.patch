@@ -1,0 +1,26 @@
+From c6f207a887182ac042a0843d01d242d9d7f8aeb3 Mon Sep 17 00:00:00 2001
+From: Mohamed Thalib H <mohamed@e-consystems.com>
+Date: Tue, 27 May 2014 12:21:55 +0530
+Subject: [PATCH 6/8] Added Micron onchip NAND ECC support to walnut_defconfig
+ Signed-off-by: Mohamed Thalib H
+ <mohamed@e-consystems.com>
+
+---
+ arch/arm/configs/walnut_defconfig |    1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm/configs/walnut_defconfig b/arch/arm/configs/walnut_defconfig
+index f458d35..e46c617 100644
+--- a/arch/arm/configs/walnut_defconfig
++++ b/arch/arm/configs/walnut_defconfig
+@@ -733,6 +733,7 @@ CONFIG_MTD_NAND_ECC=y
+ CONFIG_MTD_NAND=y
+ # CONFIG_MTD_NAND_VERIFY_WRITE is not set
+ # CONFIG_MTD_NAND_ECC_BCH is not set
++CONFIG_MTD_NAND_ONCHIP_ECC=y
+ # CONFIG_MTD_SM_COMMON is not set
+ # CONFIG_MTD_NAND_MUSEUM_IDS is not set
+ # CONFIG_MTD_NAND_GPIO is not set
+-- 
+1.7.9.5
+

@@ -1,0 +1,528 @@
+From 9751f320c10dc6755ec47c1b1eaacbbfeeb43830 Mon Sep 17 00:00:00 2001
+From: Mohamed Thalib H <mohamed@e-consystems.com>
+Date: Mon, 26 May 2014 19:33:09 +0530
+Subject: [PATCH 5/8] Onchip NAND ECC support added Signed-off-by: Mohamed
+ Thalib H <mohamed@e-consystems.com>
+
+---
+ arch/arm/mach-omap2/common-board-devices.c |    2 +-
+ arch/arm/plat-omap/include/plat/gpmc.h     |    2 +-
+ drivers/mtd/nand/Kconfig                   |    7 +
+ drivers/mtd/nand/Makefile                  |    1 +
+ drivers/mtd/nand/nand_base.c               |   73 +++++++++-
+ drivers/mtd/nand/nand_onchip_ecc.c         |  202 ++++++++++++++++++++++++++++
+ drivers/mtd/nand/omap2.c                   |    3 +
+ include/linux/mtd/nand.h                   |    2 +
+ include/linux/mtd/nand_onchip_ecc.h        |   74 ++++++++++
+ 9 files changed, 360 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/mtd/nand/nand_onchip_ecc.c
+ create mode 100644 include/linux/mtd/nand_onchip_ecc.h
+
+diff --git a/arch/arm/mach-omap2/common-board-devices.c b/arch/arm/mach-omap2/common-board-devices.c
+index d74cc69..60987d7 100644
+--- a/arch/arm/mach-omap2/common-board-devices.c
++++ b/arch/arm/mach-omap2/common-board-devices.c
+@@ -126,7 +126,7 @@ void __init omap_nand_flash_init(int options, struct mtd_partition *parts,
+ 		nand_data.parts = parts;
+ 		nand_data.nr_parts = nr_parts;
+ 		nand_data.devsize = options;
+-		nand_data.ecc_opt = OMAP_ECC_HAMMING_CODE_HW_ROMCODE;
++		nand_data.ecc_opt = OMAP_ECC_MICRON_ONDIE;
+ 
+ 		printk(KERN_INFO "Registering NAND on CS%d\n", nandcs);
+ 		if (gpmc_nand_init(&nand_data) < 0)
+diff --git a/arch/arm/plat-omap/include/plat/gpmc.h b/arch/arm/plat-omap/include/plat/gpmc.h
+index 0710e05..2053c46 100644
+--- a/arch/arm/plat-omap/include/plat/gpmc.h
++++ b/arch/arm/plat-omap/include/plat/gpmc.h
+@@ -95,7 +95,7 @@ enum omap_ecc {
+ 		/* 1-bit ecc: stored at beginning of spare area as romcode */
+ 	OMAP_ECC_HAMMING_CODE_HW_ROMCODE, /* gpmc method & romcode layout */
+ 	OMAP_ECC_BCH,			  /* BCH 4-bit method & layout */
+-	OMAP_ECC_BCH_NEW_MICRON = 0x100,	/* Use BCH on new Micron */
++	OMAP_ECC_MICRON_ONDIE,   /* MICRON ONDIE ECC SUPPORT */
+ };
+ 
+ /*
+diff --git a/drivers/mtd/nand/Kconfig b/drivers/mtd/nand/Kconfig
+index cce7b70..c6c3e77 100644
+--- a/drivers/mtd/nand/Kconfig
++++ b/drivers/mtd/nand/Kconfig
+@@ -46,6 +46,13 @@ config MTD_NAND_ECC_BCH
+ 	  ECC codes. They are used with NAND devices requiring more than 1 bit
+ 	  of error correction.
+ 
++config MTD_NAND_ONCHIP_ECC
++	bool "Support Micron 4-bit on-chip ECC"
++	default n
++	help
++	  This enables support for Micron NAND devices that support 4-bit
++	  on-chip ECC error correction.
++
+ config MTD_SM_COMMON
+ 	tristate
+ 	default n
+diff --git a/drivers/mtd/nand/Makefile b/drivers/mtd/nand/Makefile
+index 618f4ba..a888055 100644
+--- a/drivers/mtd/nand/Makefile
++++ b/drivers/mtd/nand/Makefile
+@@ -5,6 +5,7 @@
+ obj-$(CONFIG_MTD_NAND)			+= nand.o
+ obj-$(CONFIG_MTD_NAND_ECC)		+= nand_ecc.o
+ obj-$(CONFIG_MTD_NAND_BCH)		+= nand_bch.o
++obj-$(CONFIG_MTD_NAND_ONCHIP_ECC)	+= nand_onchip_ecc.o
+ obj-$(CONFIG_MTD_NAND_IDS)		+= nand_ids.o
+ obj-$(CONFIG_MTD_SM_COMMON) 		+= sm_common.o
+ 
+diff --git a/drivers/mtd/nand/nand_base.c b/drivers/mtd/nand/nand_base.c
+index 3a6f781..88aef98 100644
+--- a/drivers/mtd/nand/nand_base.c
++++ b/drivers/mtd/nand/nand_base.c
+@@ -48,6 +48,7 @@
+ #include <linux/leds.h>
+ #include <linux/io.h>
+ #include <linux/mtd/partitions.h>
++#include <linux/mtd/nand_onchip_ecc.h>
+ 
+ /* Define default oob placement schemes for large and small page devices */
+ static struct nand_ecclayout nand_oob_8 = {
+@@ -68,6 +69,7 @@ static struct nand_ecclayout nand_oob_16 = {
+ 		 . length = 8} }
+ };
+ 
++
+ static struct nand_ecclayout nand_oob_64 = {
+ 	.eccbytes = 24,
+ 	.eccpos = {
+@@ -79,6 +81,26 @@ static struct nand_ecclayout nand_oob_64 = {
+ 		 .length = 38} }
+ };
+ 
++// Added this oob struct for supporting Microns NAND On die ecc
++// by Mohamed Thalib H <mohamed@e-consystems.com>
++static struct nand_ecclayout nand_micron_oob_64 = {
++	.eccbytes = 32,
++	.eccpos = {
++		8,
++		9, 10, 11, 12, 13, 14, 15,
++		24, 25, 26, 27, 28, 29, 30, 31,
++		40, 41, 42, 43, 44, 45, 46, 47,
++		56, 57, 58, 59, 60, 61, 62, 63
++	},
++	.oobfree = {
++		{ .offset = 4, .length = 4 },
++		{ .offset = 20, .length = 4 },
++		{ .offset = 36, .length = 4 },
++		{ .offset = 52, .length = 4 },
++	},
++};
++
++
+ static struct nand_ecclayout nand_oob_128 = {
+ 	.eccbytes = 48,
+ 	.eccpos = {
+@@ -678,7 +700,7 @@ static void nand_command_lp(struct mtd_info *mtd, unsigned int command,
+ 	 * in, and deplete1 need no delay.
+ 	 */
+ 	switch (command) {
+-
++		int status, cnt;	/* MICRON: local vars used */
+ 	case NAND_CMD_CACHEDPROG:
+ 	case NAND_CMD_PAGEPROG:
+ 	case NAND_CMD_ERASE1:
+@@ -724,7 +746,31 @@ static void nand_command_lp(struct mtd_info *mtd, unsigned int command,
+ 		chip->cmd_ctrl(mtd, NAND_CMD_NONE,
+ 			       NAND_NCE | NAND_CTRL_CHANGE);
+ 
++		/* MICRON: wait until part RDY; tR_ECC max */
++		for(cnt=0; cnt<70; cnt++) {
++			//ndelay(1000);
++			udelay(chip->chip_delay);
++			/* 1 usec delay */
++			chip->cmdfunc(mtd, NAND_CMD_STATUS, -1, -1);
++			status = chip->read_byte(mtd);
++			if( (status & NAND_STATUS_READY ) )
++				break;
++		}
++		/* MICRON: Look for STATUS bit ERR */
++		if( (status & NAND_STATUS_FAIL) ) {
++			printk(KERN_WARNING
++			       "WARNING :: READ Operation ECC Error: 0x%02x delay %d usec\n",
++			       status,cnt+1);
++			/* do something on fail */
++		}
++		/* MICRON: re-issue CMD0 after STATUS Check */
++		chip->cmd_ctrl(mtd, NAND_CMD_READ0,
++			       NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
++		chip->cmd_ctrl(mtd, NAND_CMD_NONE,
++			       NAND_NCE | NAND_CTRL_CHANGE);
++		
+ 		/* This applies to read commands */
++		
+ 	default:
+ 		/*
+ 		 * If we don't have access to the busy pin, we apply the given
+@@ -3408,14 +3454,33 @@ int nand_scan_tail(struct mtd_info *mtd)
+ 		chip->ecc.size = mtd->writesize;
+ 		chip->ecc.bytes = 0;
+ 		break;
+-
++	case NAND_ECC_MICRON_ONDIE:
++		printk(KERN_INFO "NAND ECC: HW On chip\n");
++                chip->ecc.bytes = 0;
++                chip->ecc.size = 2048;
++                chip->ecc.layout = &nand_micron_oob_64;
++		chip->ecc.calculate = nand_onchip_calculate_ecc;
++                chip->ecc.correct = nand_onchip_correct_ecc;
++                chip->ecc.hwctl = nand_onchip_hwctl;
++                chip->ecc.read_page = nand_read_page_hwecc;
++                chip->ecc.write_page = nand_write_page_hwecc;
++                chip->ecc.read_page_raw = nand_read_page_raw;
++                chip->ecc.write_page_raw = nand_write_page_raw;
++                chip->ecc.read_oob = nand_onchip_read_oob_ecc;
++                chip->ecc.write_oob = nand_write_oob_std;
++
++                chip->chip_delay = 100;
++                //printk("\nnand_base: Nand chip delay %x \n",chip->chip_delay);
++
++                nand_onchip_enable_ecc(mtd, 1);
++                do_custom_nand_settings(mtd, chip);
++		break;
+ 	default:
+ 		pr_warn("Invalid NAND_ECC_MODE %d\n", chip->ecc.mode);
+ 		BUG();
+ 	}
+ 
+-	do_custom_nand_settings(mtd,chip);
+-
++	
+ 	/* For many systems, the standard OOB write also works for raw */
+ 	if (!chip->ecc.read_oob_raw)
+ 		chip->ecc.read_oob_raw = chip->ecc.read_oob;
+diff --git a/drivers/mtd/nand/nand_onchip_ecc.c b/drivers/mtd/nand/nand_onchip_ecc.c
+new file mode 100644
+index 0000000..69618d5
+--- /dev/null
++++ b/drivers/mtd/nand/nand_onchip_ecc.c
+@@ -0,0 +1,202 @@
++#include <linux/delay.h>
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/bitops.h>
++#include <linux/mtd/mtd.h>
++#include <linux/mtd/nand.h>
++
++/* Extended commands for ONFI devices */
++#define NAND_CMD_GET_FEATURES	0xee
++#define NAND_CMD_SET_FEATURES	0xef
++
++static void micron_set_features(struct mtd_info *mtd, uint8_t faddr,
++				uint8_t *features)
++{
++	struct nand_chip *chip = mtd->priv;
++
++	chip->select_chip(mtd, 0);
++
++	/* Send the status command */
++	chip->cmd_ctrl(mtd, NAND_CMD_SET_FEATURES,
++		NAND_CTRL_CHANGE | NAND_CTRL_CLE);
++
++	/* Send the feature address */
++	chip->cmd_ctrl(mtd, faddr, NAND_CTRL_CHANGE | NAND_CTRL_ALE);
++
++	/* Switch to data access */
++	chip->cmd_ctrl(mtd, NAND_CMD_NONE, NAND_CTRL_CHANGE | NAND_NCE);
++
++	ndelay(100);
++	
++	pr_debug( "%s: IO_ADDR_W %p\n",	__func__, chip->IO_ADDR_W);
++
++	if (chip->options & NAND_BUSWIDTH_16) {
++		uint16_t ftrs16[4];
++		int i;
++		for (i=0; i<4; ++i)
++			ftrs16[i] = features[i];
++		chip->write_buf(mtd, (uint8_t *)ftrs16, sizeof(ftrs16));
++	} else
++		chip->write_buf(mtd, features, 4);
++
++	udelay(2);
++
++	pr_debug( "%s: faddr %02x [%02x %02x %02x %02x]\n",
++		__func__, faddr,
++		features[0], features[1], features[2], features[3]);
++}
++
++static void micron_get_features(struct mtd_info *mtd, uint8_t faddr,
++				uint8_t *features)
++{
++	struct nand_chip *chip = mtd->priv;
++
++	chip->select_chip(mtd, 0);
++
++	/* Send the status command */
++	chip->cmd_ctrl(mtd, NAND_CMD_GET_FEATURES,
++		NAND_CTRL_CHANGE | NAND_CTRL_CLE);
++
++	/* Send the feature address */
++	chip->cmd_ctrl(mtd, faddr, NAND_CTRL_CHANGE | NAND_CTRL_ALE);
++
++	/* Switch to data access */
++	chip->cmd_ctrl(mtd, NAND_CMD_NONE, NAND_CTRL_CHANGE | NAND_NCE);
++
++	ndelay(100);
++
++	pr_debug( "%s: IO_ADDR_R %p\n",
++		__func__, chip->IO_ADDR_R);
++
++	if (chip->options & NAND_BUSWIDTH_16) {
++		uint16_t ftrs16[4];
++		int i;
++		chip->read_buf(mtd, (uint8_t*)ftrs16, sizeof(ftrs16));
++		for (i=0; i<4; ++i)
++			features[i] = ftrs16[i];
++	} else
++		chip->read_buf(mtd, features, 4);
++
++	pr_debug( "%s: faddr %02x [%02x %02x %02x %02x]\n",
++		__func__, faddr,
++		features[0], features[1], features[2], features[3]);
++}
++
++void nand_onchip_enable_ecc(struct mtd_info *mtd, int enable)
++{
++	uint8_t params[4];
++
++	pr_debug( "%s:%d enable %d\n",
++		__func__, __LINE__, enable);
++
++	memset(params, 0x00, sizeof(params));
++	if (enable)
++		params[0] = 0x08;
++
++	micron_set_features(mtd, 0x90, params);
++	micron_get_features(mtd, 0x90, params);
++
++	pr_debug( "%s: %02x %02x %02x %02x\n",
++		__func__, params[0], params[1], params[2], params[3]);
++}
++EXPORT_SYMBOL(nand_onchip_enable_ecc);
++
++int nand_onchip_calculate_ecc(struct mtd_info *mtd, const u_char *dat,
++			      u_char *ecc_code)
++{
++	pr_debug( "%s:\n", __func__);
++	return 0;
++}
++EXPORT_SYMBOL(nand_onchip_calculate_ecc);
++
++int nand_onchip_correct_ecc(struct mtd_info *mtd, u_char *dat,
++			    u_char *read_ecc, u_char *calc_ecc)
++{
++	struct nand_chip *chip = mtd->priv;
++
++	pr_debug( "%s: ecc_status %02x\n",
++				__func__, chip->ecc.status);
++
++	/* We stored the read status in chip->ecc.status in the read.  If bit 0
++	 * is set, then there was an uncorrectable ECC error.  If bit 3 is set,
++	 * then there was a correctable error (up to four bits of correction).
++	 */
++	if (chip->ecc.status & 0x01)
++		return -1;
++	if (chip->ecc.status & 0x08)
++		return 4;
++	return 0;
++}
++EXPORT_SYMBOL(nand_onchip_correct_ecc);
++
++/**
++ * nand_chip_read_oob_hwecc - [REPLACABLE] OOB data read function for on chip HW
++ *                         ECC.
++ * @mtd:	mtd info structure
++ * @chip:	nand chip info structure
++ * @page:	page number to read
++ * @sndcmd:	flag whether to issue read command or not
++ */
++int nand_onchip_read_oob_ecc(struct mtd_info *mtd, struct nand_chip *chip,
++			     int page, int sndcmd)
++{
++	pr_debug( "%s: page = %d, len = %i\n",
++				__func__, page, mtd->oobsize);
++
++	if (sndcmd) {
++		chip->cmdfunc(mtd, NAND_CMD_READOOB, 0, page);
++		sndcmd = 0;
++	}
++
++	/* Send the status command */
++	chip->cmd_ctrl(mtd, NAND_CMD_STATUS,
++		NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
++	/* Switch to data access */
++	chip->cmd_ctrl(mtd, NAND_CMD_NONE,
++		NAND_NCE | NAND_CTRL_CHANGE);
++	chip->ecc.status = chip->read_byte(mtd);
++	pr_debug( "%s: ecc_status %02x\n",
++				__func__, chip->ecc.status);
++	if (chip->ecc.status& (0x8|0x1)) {
++		pr_debug( "%s:%d page %d ecc_status %02x\n",
++					 __func__, __LINE__,
++					page, chip->ecc.status);
++		if (chip->ecc.status & 0x1)
++		{
++			mtd->ecc_stats.failed++;
++			pr_debug( "%s: ecc_stats.failed= %d\n",
++				mtd->name, mtd->ecc_stats.failed);
++		}
++		else if (chip->ecc.status & 0x8)
++		{
++			mtd->ecc_stats.corrected += 4;
++			pr_debug( "%s: ecc_stats.corrected= %d\n",
++				mtd->name, mtd->ecc_stats.corrected);
++		}
++	}
++
++	/* Send the read prefix */
++	chip->cmd_ctrl(mtd, NAND_CMD_READ0,
++		NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
++	/* Switch to data access */
++	chip->cmd_ctrl(mtd, NAND_CMD_NONE,
++		NAND_NCE | NAND_CTRL_CHANGE);
++	
++	chip->read_buf(mtd, chip->oob_poi, mtd->oobsize);
++	return sndcmd;
++}
++EXPORT_SYMBOL(nand_onchip_read_oob_ecc);
++
++void nand_onchip_hwctl(struct mtd_info *mtd, int mode)
++{
++	/* Nothing to do here since the on-chip ECC is only enabled once. */
++	pr_debug( "%s:\n", __func__);
++}
++EXPORT_SYMBOL(nand_onchip_hwctl);
++
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Jeff Cooper <jeff.cooper@logicpd.com>");
++MODULE_DESCRIPTION("NAND on-chip ECC support");
+diff --git a/drivers/mtd/nand/omap2.c b/drivers/mtd/nand/omap2.c
+index f745f00..ff332f1 100644
+--- a/drivers/mtd/nand/omap2.c
++++ b/drivers/mtd/nand/omap2.c
+@@ -1062,8 +1062,11 @@ static int __devinit omap_nand_probe(struct platform_device *pdev)
+ 		info->nand.ecc.hwctl            = omap_enable_hwecc;
+ 		info->nand.ecc.correct          = omap_correct_data;
+ 		info->nand.ecc.mode             = NAND_ECC_HW;
++	} else if (pdata->ecc_opt == OMAP_ECC_MICRON_ONDIE) {
++		info->nand.ecc.mode             = NAND_ECC_MICRON_ONDIE;
+ 	}
+ 
++	
+ 	/* DIP switches on some boards change between 8 and 16 bit
+ 	 * bus widths for flash.  Try the other width if the first try fails.
+ 	 */
+diff --git a/include/linux/mtd/nand.h b/include/linux/mtd/nand.h
+index 904131b..64c8e25 100644
+--- a/include/linux/mtd/nand.h
++++ b/include/linux/mtd/nand.h
+@@ -141,6 +141,7 @@ typedef enum {
+ 	NAND_ECC_HW_SYNDROME,
+ 	NAND_ECC_HW_OOB_FIRST,
+ 	NAND_ECC_SOFT_BCH,
++	NAND_ECC_MICRON_ONDIE,
+ } nand_ecc_modes_t;
+ 
+ /*
+@@ -353,6 +354,7 @@ struct nand_ecc_ctrl {
+ 	int total;
+ 	int prepad;
+ 	int postpad;
++	int status;
+ 	struct nand_ecclayout	*layout;
+ 	void *priv;
+ 	void (*hwctl)(struct mtd_info *mtd, int mode);
+diff --git a/include/linux/mtd/nand_onchip_ecc.h b/include/linux/mtd/nand_onchip_ecc.h
+new file mode 100644
+index 0000000..69b42f6
+--- /dev/null
++++ b/include/linux/mtd/nand_onchip_ecc.h
+@@ -0,0 +1,74 @@
++/*
++ * Copyright © 2011 Jeff Cooper <jeff.cooper@logicpd.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This file is the header for the on-chip NAND ECC implementation.
++ */
++
++#ifndef __MTD_NAND_ONCHIP_ECC_H__
++#define __MTD_NAND_ONCHIP_ECC_H__
++
++struct mtd_info;
++
++#if defined(CONFIG_MTD_NAND_ONCHIP_ECC)
++/*
++ * Enable/Disable on-chip ECC.
++ */
++void nand_onchip_enable_ecc(struct mtd_info *mtd, int enable);
++
++/*
++ * Calculate on-chip ecc code
++ */
++int nand_onchip_calculate_ecc(struct mtd_info *mtd, const u_char *dat,
++			      u_char *ecc_code);
++
++/*
++ * Detect and correct bit errors
++ */
++int nand_onchip_correct_ecc(struct mtd_info *mtd, u_char *dat, u_char *read_ecc,
++			    u_char *calc_ecc);
++
++int nand_onchip_read_oob_ecc(struct mtd_info *mtd, struct nand_chip *chip,
++			     int page, int sndcmd);
++
++void nand_onchip_hwctl(struct mtd_info *mtd, int mode);
++
++#else /* !CONFIG_MTD_NAND_ONCHIP_ECC */
++
++static inline void nand_onchip_enable_ecc(struct mtd_info *mtd, int enable)
++{
++	return;
++}
++
++static inline int
++nand_onchip_calculate_ecc(struct mtd_info *mtd, const u_char *dat,
++			  u_char *ecc_code)
++{
++	return -1;
++}
++
++static inline int
++nand_onchip_correct_ecc(struct mtd_info *mtd, u_char *dat, u_char *read_ecc,
++			u_char *calc_ecc)
++{
++	return -1;
++}
++
++static inline int
++nand_onchip_read_oob_ecc(struct mtd_info *mtd, struct nand_chip *chip,
++			 int page, int sndcmd)
++{
++	return -1;
++}
++
++static inline void nand_onchip_hwctl(struct mtd_info *mtd, int mode)
++{
++	return;
++}
++
++#endif /* CONFIG_MTD_NAND_ONCHIP_ECC */
++
++#endif /* __MTD_NAND_NOCHIP_ECC_H__ */
+-- 
+1.7.9.5
+

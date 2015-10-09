@@ -1,0 +1,1713 @@
+From cda4bd28dc65f61cc28629154ebbf3bd6850523c Mon Sep 17 00:00:00 2001
+From: Tharmarajan Ganeshan <tharma@e-consystems.com>
+Date: Fri, 12 Sep 2014 13:35:27 -0400
+Subject: [PATCH] panel driver modified for gamma contrast correction in hx8363
+
+
+Signed-off-by: Tharmarajan Ganeshan <tharma@e-consystems.com>
+---
+ .../video/omap2/displays/panel-himax-hx8369a02.c   | 1370 ++++++++++++++++++--
+ 1 files changed, 1229 insertions(+), 141 deletions(-)
+
+diff --git a/drivers/video/omap2/displays/panel-himax-hx8369a02.c b/drivers/video/omap2/displays/panel-himax-hx8369a02.c
+index 3f2748c..ec047eb 100644
+--- a/drivers/video/omap2/displays/panel-himax-hx8369a02.c
++++ b/drivers/video/omap2/displays/panel-himax-hx8369a02.c
+@@ -1,8 +1,8 @@
+ /*!
+  * \file	panel-himax-hx8369a02.c
+  *
+- * \brief LCD panel driver for Truly TFT480800 TFT display panel 
+- * 	with Himax hx8369-a02 and hx8363 display controller. 
++ * \brief LCD panel driver for Truly TFT480800 TFT display panel
++ *	with Himax hx8369-a02 and hx8363 display controller.
+  *
+  * \author Author: Michael Tsukernik <mike.tsukernik@logicpd.com>
+  *
+@@ -19,6 +19,7 @@
+  * this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/delay.h>
+ #include <linux/spi/spi.h>
+@@ -26,18 +27,60 @@
+ #include <video/omapdss.h>
+ #include <plat/board-omap3logic-display.h>
+ 
++/* Standard command common to HX8363 and HX8369 */
++#define HX836X_SWRESET			0x01
++#define HX836X_SLPIN			0x10
++#define HX836X_SLPOUT			0x11
++#define HX836X_INVOFF			0x20
++#define HX836X_INVON			0x21
++#define HX836X_INVON			0x21
++#define HX836X_GAMSET			0x26
++#define HX836X_DISPOFF			0x28
++#define HX836X_DISPON			0x29
++#define HX836X_MADCTL			0x36
++#define HX836X_COLMOD			0x3A
++#define HX836X_READ_DDB_CONTINUE	0xA8
++#define HX836X_READ_ID1			0xDA
++#define HX836X_READ_ID2			0xDB
++#define HX836X_READ_ID3			0xDC
++
++/* User define command list common to HX8363 and HX8369*/
++#define HX836X_SETPOWER			0xB1
++#define HX836X_SETRGBIF			0xB3
++#define HX836X_SETCYC			0xB4
++#define HX836X_SETVCOM			0xB6
++#define HX836X_SET_EXTENSION_COMMAND    0xB9
++#define HX836X_SETDGCLUT		0xC1
++#define HX836X_SETPANEL			0xCC
++#define HX836X_SETGAMMA			0xE0
++#define HX836X_SET_SPIREAD_IX		0xFE
++#define HX836X_GET_SPIREAD		0xFF
++
++/* Command specific to HX8369 */
++#define HX8369_RAMWR			0x2C
++#define HX8369_TEON			0x35
++#define HX8369_SETDISP			0xB2
++#define HX8369_SETGIP			0xD5
++#define HX8369_GETHXID			0xF4
++
++
++
+ #define LCD_PANEL_HIMAX_HX8369	1
+ #define LCD_PANEL_HIMAX_HX8363	2
+ #define LCD_PANEL_HIMAX_UNKNOWN	-1
+ #define LCD_PANEL_YET_TO_DETECT	0
++
+ static struct spi_device	*spidev = NULL;
++/* Function Protypes */
++static int hx8369_write_reg(u8 reg, u8 num, ...);
++static int detect_lcd_panel(void);
+ static int econ_hx8369_read_reg(u8 reg, u8 n_rx_bytes, u8 *read_buffer,u8 is_reg_command);
+ 
+ struct omap3logic_panel omap3logic_default_panel = {
+         .name = "himax_hx8369",
+-        .config  = ( OMAP_DSS_LCD_TFT | 
+-		     OMAP_DSS_LCD_IVS | 
+-		     OMAP_DSS_LCD_IHS | 
++        .config  = ( OMAP_DSS_LCD_TFT |
++		     OMAP_DSS_LCD_IVS |
++		     OMAP_DSS_LCD_IHS |
+ 		     OMAP_DSS_LCD_IPC |
+ 		     OMAP_DSS_LCD_ONOFF |
+ 		     ( 0 & OMAP_DSS_LCD_RF)
+@@ -55,13 +98,1042 @@ struct omap3logic_panel omap3logic_default_panel = {
+                 .hsw		= 10,
+                 .hfp		= 10,
+                 .hbp		= 10,
+-                
++
+                 .vsw		= 2,
+                 .vfp		= 2,
+                 .vbp		= 2,
+         },
+ };
+ 
++#define HX836x_DEFAULT_CONTRAST_LEVEL	3
++#define HX836x_MIN_CONTRAST_LEVEL	0
++#define HX836x_MAX_CONTRAST_LEVEL	7
++
++#define HX836x_DEFAULT_GAMMA_LEVEL	2
++#define HX836x_MIN_GAMMA_LEVEL		0
++#define HX836x_MAX_GAMMA_LEVEL		4
++
++
++static int panel_type = LCD_PANEL_YET_TO_DETECT;
++static int hx836x_contrast_level;
++static int hx836x_gamma_level;
++
++static u8 hx8363_contrast_value[HX836x_MAX_CONTRAST_LEVEL + 1][2] = {
++								{0x00, 0x00},
++								{0x08, 0x05},
++								{0x0C, 0x0C},
++								{0x22, 0x22},
++								{0x1D, 0x23},
++								{0x24, 0x2C},
++								{0x33, 0x35},
++								{0x7F, 0x7F},
++							};
++
++static u8 hx8369_contrast_value[HX836x_MAX_CONTRAST_LEVEL + 1][2] = {
++								{0x00, 0x00},
++								{0x0E, 0x16},
++								{0x1C, 0x24},
++								{0x2A, 0x32},
++								{0x31, 0x39},
++								{0x36, 0x3E},
++								{0x3A, 0x42},
++								{0x7F, 0x7F},
++							};
++
++/* Its a global array which holds current register index and data length */
++/* issued by user through spi_read sysfs attribute */
++static u32 sysfs_spi_read_cmd[2];
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access spi_read sysfs attribute.
++
++  \Purpose:
++   This attribute is used to read data to controller's registers.
++   Attribute usage, just
++   echo "Register(in Hex), Number of data (in Decimal)" > /sys/devices/plat
++   form/omapdss/display0/spi_read
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++  \param [in] buf
++   It is of type char pointer.It is an input buffer and used to retrrectly reading reg commandi
++   input such as register index and data length.
++  \param [in] size
++   It is of type ssize_t and which gives size of characters written into input buf
++  \return size of characters written into to input buf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t sysfs_spi_read(struct device *dev,
++                struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++	int r = 0;
++
++	if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++	memset(sysfs_spi_read_cmd, 0, 2);
++
++	r = sscanf(buf, "0x%02X,%d", &sysfs_spi_read_cmd[0], &sysfs_spi_read_cmd[1]);
++        if(r < 0) {
++		pr_err("%s : sscanf failed..\n", __FUNCTION__);
++                return -1;
++	}
++
++	return size;
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access spi_read_data sysfs attribute.
++  \Purpose:
++   This attribute is to show result of spi_read sysfs attribute. It means that
++   the contents of register will be show to user once after accessed spi_read
++   attribute.
++   Attribute usage, just
++   echo "Register(in Hex), Number of data (in Decimal)" > /sys/devices/plat
++   form/omapdss/display0/spi_read
++   cat /sys/devices/platform/omapdss/display0/spi_read_data
++   to show register datas.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to show register datas using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t sysfs_show_spi_read_data(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++	int i, r = 0, offset = 0;
++	int reg = 0, len = 0;
++	u8 *rbuf = NULL;
++	u8 *sbuf = NULL;
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++	}
++
++	if(sysfs_spi_read_cmd[0]) {
++		reg = sysfs_spi_read_cmd[0];
++		len = sysfs_spi_read_cmd[1];
++	}
++	else {
++		pr_err("%s  : Unable to find register index...\n",  __FUNCTION__);
++		pr_info("%s : Please send register index using spi_read attribute before "
++			      "accessing spi_read_data.\n",  __FUNCTION__);
++		return -1;
++	}
++
++	rbuf = (u8 *) kzalloc (len, GFP_KERNEL);
++	if(!rbuf) {
++		pr_err("%s : Failed to allocate read buffer..\n", __FUNCTION__);
++		r = -ENOMEM;
++		goto out;
++	}
++
++	if(reg != HX836X_READ_ID1 && reg != HX836X_READ_ID2 && reg != HX836X_READ_ID3 &&
++						       reg > HX836X_READ_DDB_CONTINUE) {
++		if(panel_type == LCD_PANEL_HIMAX_HX8363)
++			r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x63);
++		if(panel_type == LCD_PANEL_HIMAX_HX8369)
++			r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x69);
++		if(r) {
++			pr_err("%s : Failed to write to SETEXTC Register 0xB9\n", __FUNCTION__);
++			goto out;
++		}
++		r = econ_hx8369_read_reg(reg, len, rbuf, 0); //Reading user defined commands using spiread index
++	}
++	else
++		r = econ_hx8369_read_reg(reg, len, rbuf, 1); //Directly reading reg command
++	if(r){
++		pr_err("%s : Failed to read register = 0x%02X..\n", __FUNCTION__, reg);
++		goto out;
++	}
++
++
++	sbuf = (u8 *) kzalloc ((len * 6), GFP_KERNEL);
++	if(!sbuf) {
++		pr_err("%s : Failed to allocate show buffer..\n", __FUNCTION__);
++		r = -ENOMEM;
++		goto out;
++	}
++
++	for(i = 0; i < (len - 1); i++)
++		offset += snprintf(sbuf + offset, 6, "0x%02X,", rbuf[i]);
++	snprintf(sbuf + offset, 5, "0x%02X", rbuf[i]);
++
++	r = snprintf(buf, PAGE_SIZE, "%s\n", sbuf);
++        if(r < 0) {
++		pr_err("%s : snprintf failed..\n", __FUNCTION__);
++	}
++
++out:
++	memset(sysfs_spi_read_cmd, 0, 2);
++	if(rbuf) kfree(rbuf);
++	if(sbuf) kfree(sbuf);
++
++	return r;
++
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called from sysfs_spi_write routine.
++
++  \Purpose:
++   A utility function to write a data array to lcd controller's register
++   over SPI.
++
++  \param [in] reg
++   It is of type u8.This value indicates which register to be written to.
++
++  \param [in] num
++   It is of type u8.This value indicates the number of datas to write to the register.
++
++  \param [in] data
++   It is of type u8 pointer. This carries the data to be written to the register.
++
++  \return This function returns 0 on success.  Upon failure, the function returns
++   errno related to spi_sync().
++*/
++/*******************************************************************************/
++
++static int hx836x_spi_write_array(u8 reg, u8 len, u8 *data)
++{
++        int i;
++	u16 *local_buf;
++	struct spi_message msg;
++	struct spi_transfer xfer;
++
++	spi_message_init(&msg);
++
++	local_buf = kcalloc((len + 1), sizeof(*local_buf), GFP_KERNEL);
++	if (!local_buf) {
++		pr_err("%s : Memory not availble to allocate local buf..\n", __FUNCTION__);
++                return -ENOMEM;
++	}
++
++        /* register index */
++        local_buf[0] = reg;
++
++	for (i = 0; i < len; i++) {
++		local_buf[i + 1] = data[i];
++                local_buf[i + 1] |= 1 << 8;
++	}
++	xfer.len	   = (2 * len);
++	xfer.cs_change	   = 0;
++        xfer.bits_per_word = 9;
++        xfer.rx_buf	   = NULL;
++        xfer.tx_buf	   = local_buf;
++        xfer.speed_hz      = 50000,
++        spi_message_add_tail(&xfer, &msg);
++
++        return spi_sync(spidev, &msg);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access spi_write sysfs attribute.
++
++  \Purpose:
++   This attribute is used to write data to controller's registers.
++   Attribute usage, just
++   echo "Register(in Hex), Number of data (in Decimal), Datas...(In Hex)" > /sys
++   /devices/platform/omapdss/display0/spi_write
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [in] buf
++   It is of type char pointer.It is an input buffer and used to retrieve the user
++   input such as register index, length and data.
++
++  \param [in] size
++   It is of type ssize_t and which gives size of characters written into input buf
++
++
++  \return size of characters written into to input buf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t sysfs_spi_write(struct device *dev,
++                struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++	int r = 0;
++	int i, offset = 0;
++	u8 *data = NULL;
++	u8 wcmd, wlen;
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++	}
++
++	offset = sscanf(buf, "0x%02X,%d", (u32 *) &wcmd, (u32 *) &wlen);
++        if(r < 0) {
++		pr_err("%s : sscanf failed for wcmd and wlen..\n", __FUNCTION__);
++                return -1;
++	}
++
++	if(wlen == 0) {
++		r = hx8369_write_reg(wcmd, wlen);
++		if(r) {
++			pr_err("%s : Failed to write register 0x%02X\n", __FUNCTION__, wcmd);
++			return r;
++		}
++		return size;
++	}
++
++	else if(wlen > 0) {
++		data = (u8 *) kzalloc (wlen, GFP_KERNEL);
++		if(!data) {
++			pr_err("%s : Failed to allocate data buffer..\n", __FUNCTION__);
++			return -1;
++		}
++
++		offset *= 4; //Changing offset value to point base of data
++		for(i = 0; i < wlen; i++) {
++			sscanf(buf + offset, "0x%02X", (u32 *) &data[i]);
++			offset += 5;
++		}
++
++		if(wcmd != HX836X_READ_ID1 && wcmd != HX836X_READ_ID2 && wcmd != HX836X_READ_ID3 &&
++									 wcmd > HX836X_READ_DDB_CONTINUE) {
++			if(panel_type == LCD_PANEL_HIMAX_HX8363)
++				r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x63);
++
++			if(panel_type == LCD_PANEL_HIMAX_HX8369)
++				r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x69);
++			if(r) {
++				pr_err("%s : Failed to write to SETEXTC Register 0xB9\n", __FUNCTION__);
++				kfree(data);
++				return(r);
++			}
++			//Writing user defined commands using spiread index
++			r = hx836x_spi_write_array(wcmd, wlen, data);
++		}
++		else
++			//Directly reading reg command
++			r = hx836x_spi_write_array(wcmd, wlen, data);
++		if(r){
++			pr_err("%s : Failed to read register = 0x%02X..\n", __FUNCTION__, wcmd);
++			kfree(data);
++			return(r);
++		}
++	}
++	else {
++		pr_info("%s : Please provide length of data. If there is no data required, "
++			      "mention length as 0\n", __FUNCTION__);
++		kfree(data);
++		return -1;
++	}
++
++	kfree(data);
++	return size;
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called from display_store_contrast routine.
++
++  \Purpose:
++   This function will write apropriate values to 0xB1 registers with respective
++   to level changes. The changes with gamma adjustments will reflect in display.
++
++  \param [in] dssdev
++   It is of type struct omap_dss_device and it is used to return panel information
++
++  \param [in] level
++   It is of type int and it is the input level to adjust contarst
++
++  \return This function returns 0 on success.  Upon failure, the function returns
++  errno.
++*/
++/*******************************************************************************/
++
++static int hx836x_panel_adjust_contrast(struct omap_dss_device *dssdev, int level)
++{
++	int r = 0;
++	char rbuf[20];
++
++	memset(rbuf, 0, 20);
++
++	switch(panel_type) {
++        case LCD_PANEL_HIMAX_HX8363:
++		r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x63);
++		if(r) return(r);
++		/* Reading SETPOWER Command to get the Contrast values(9th and 10th) parameter */
++		r = econ_hx8369_read_reg(HX836X_SETPOWER, 12, rbuf, 0);
++		if(r) return(r);
++
++		r = hx8369_write_reg(HX836X_SETPOWER, 12,
++				rbuf[0], rbuf[1], rbuf[2], rbuf[3], rbuf[4], rbuf[5], rbuf[6], rbuf[7],
++				hx8363_contrast_value[level][0], hx8363_contrast_value[level][1],
++				rbuf[10], rbuf[11]);
++		break;
++
++	case LCD_PANEL_HIMAX_HX8369:
++		r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x69);
++		if(r) return(r);
++		/* Reading SETPOWER Command to get the Contrast values(9th and 10th) parameter */
++		r = econ_hx8369_read_reg(HX836X_SETPOWER, 19, rbuf, 0);
++		if(r) return(r);
++
++		r = hx8369_write_reg(HX836X_SETPOWER, 19,
++			rbuf[0], rbuf[1], rbuf[2], rbuf[3], rbuf[4], rbuf[5], rbuf[6],
++			hx8369_contrast_value[level][0], hx8369_contrast_value[level][1],
++			rbuf[9], rbuf[10], rbuf[11], rbuf[12], rbuf[13], rbuf[14], rbuf[15],
++			rbuf[16], rbuf[17], rbuf[18]);
++                break;
++
++	default:
++	case LCD_PANEL_HIMAX_UNKNOWN:
++		r = -1;
++		pr_err("Error %s: Panel Himax Unknown..\n", __FUNCTION__);
++		break;
++	}
++	msleep(10);
++	return (r);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called from display_store_gamma routine.
++
++  \Purpose:
++   This function will write apropriate values to 0xE0 registers with respective
++   to level changes. The changes with gamma adjustments will reflect in display.
++
++  \param [in] dssdev
++   It is of type struct omap_dss_device and it is used to return panel information
++
++  \param [in] level
++   It is of type int and it is the input level to adjust gamma
++
++  \return This function returns 0 on success.  Upon failure, the function returns
++  errno.
++*/
++/*******************************************************************************/
++
++static int hx836x_panel_adjust_gamma(struct omap_dss_device *dssdev, int level)
++{
++	int r = 0;
++
++	switch(panel_type) {
++        case LCD_PANEL_HIMAX_HX8363:
++		r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x63);
++		if(r) return(r);
++
++		switch(level) {
++                case 0:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++                                             0x3F, 0xBF, 0x7F, 0x7F, 0x3F, 0x3F, 0x05, 0xD6, 0x0C, 0x93,
++                                             0x58, 0x15, 0x58, 0x9F, 0x19, 0x3F, 0xBF, 0x7F, 0x7F, 0x3F,
++					     0x3F, 0x05, 0xD6, 0x0C, 0x93, 0x58, 0x15, 0x58, 0x9F, 0x19);
++                        break;
++                case 1:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++                                             0x1F, 0xB1, 0x77, 0x7A, 0x3E, 0x3F, 0x05, 0xD6, 0x0C, 0x93,
++                                             0x58, 0x15, 0x58, 0x9F, 0x19, 0x1F, 0xB1, 0x77, 0x7A, 0x3E,
++					     0x3F, 0x05, 0xD6, 0x0C, 0x93, 0x58, 0x15, 0x58, 0x9F, 0x19);
++                        break;
++                case HX836x_DEFAULT_GAMMA_LEVEL:
++												r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++														0x00,0x43,0x4F,0x72,0x30,0x3F,0x05,0x4F,0xCF,0xD1,
++														0x53,0x12,0x14,0x54,0x19,0x00,0x43,0x4F,0x72,0x30,
++														0x3F,0x05,0x4F,0xCF,0xD1,0x53,0x12,0x14,0x54,0x19);
++                        break;
++                case 3:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++                                             0x00, 0x8E, 0x52, 0x59, 0x1B, 0x1F, 0x05, 0xD6, 0x0C, 0x93,
++                                             0x58, 0x15, 0x58, 0x9F, 0x19, 0x00, 0x8E, 0x52, 0x59, 0x1B,
++					     0x1F, 0x05, 0xD6, 0x0C, 0x93, 0x58, 0x15, 0x58, 0x9F, 0x19);
++                        break;
++                case 4:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++                                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xD6, 0x0C, 0x93,
++                                             0x58, 0x15, 0x58, 0x9F, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00,
++					     0x00, 0x05, 0xD6, 0x0C, 0x93, 0x58, 0x15, 0x58, 0x9F, 0x19);
++                        break;
++                default:
++	                r = -1;
++                        break;
++		}
++		mdelay(5);
++                break;
++
++	case LCD_PANEL_HIMAX_HX8369:
++		r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x69);
++		if(r) return(r);
++
++		switch(level) {
++		case 0:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x28, 0x46,
++                                             0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++                                             0x17, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x28,
++                                             0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++                                             0x0F, 0x17);
++			break;
++		case 1:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x1F, 0x31, 0x37, 0x3A, 0x3E, 0x3F, 0x28, 0x46,
++                                             0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++                                             0x17, 0x1F, 0x31, 0x37, 0x3A, 0x3E, 0x3F, 0x28,
++                                             0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++                                             0x0F, 0x17);
++			break;
++		case HX836x_DEFAULT_GAMMA_LEVEL:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28, 0x46,
++                                             0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++                                             0x17, 0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28,
++                                             0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++                                             0x0F, 0x17);
++			break;
++		case 3:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x00, 0x09, 0x0C, 0x19, 0x1B, 0x1F, 0x28, 0x46,
++                                             0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++                                             0x17, 0x00, 0x09, 0x0C, 0x19, 0x1B, 0x1F, 0x28,
++                                             0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++                                             0x0F, 0x17);
++			break;
++		case 4:
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x46,
++                                             0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++                                             0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28,
++                                             0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++                                             0x0F, 0x17);
++			break;
++		default:
++			r = -1;
++			break;
++		}
++	msleep(10);
++	break;
++
++	default:
++        case LCD_PANEL_HIMAX_UNKNOWN:
++		r = -1;
++		pr_err("Error %s: Panel Himax Unknown..\n", __FUNCTION__);
++		break;
++	}
++	return (r);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access adjust_contrast sysfs attribute.
++
++  \Purpose:
++   This attribute would help user to know contrast level is being currently set.
++   Attribute usage, just
++   cat /sys/devices/platform/omapdss/display0/adjust_contrast
++   to show current contrast level.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to print current contrast level using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_show_contrast(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++        return snprintf(buf, PAGE_SIZE, "%d\n", hx836x_contrast_level);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access adjust_contrast sysfs attribute.
++
++  \Purpose:
++   This attribute is used to adjust contrast levels.
++   Attribute usage, just
++   echo level > /sys/devices/platform/omapdss/display0/adjust_contrast
++   to change contrast levels.
++   Use contrast_conf_value attribute to know the supported levels.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [in] buf
++   It is of type char pointer.It is an input buffer and used to retrieve the user
++   input contrast level
++
++  \param [in] size
++   It is of type ssize_t and which gives size of characters written into input buf
++
++
++  \return size of characters written into to input buf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_store_contrast(struct device *dev,
++                struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++	int r = 0, contrast_level;
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++
++	r = kstrtoint(buf, 0, &contrast_level);
++        if (r)
++                return r;
++
++	if(contrast_level < HX836x_MIN_CONTRAST_LEVEL && contrast_level > HX836x_MIN_CONTRAST_LEVEL) {
++		pr_err("%s  : Error level %d not supported\n", __FUNCTION__, contrast_level);
++		pr_info("%s : Supported contrast levels are from %d to %d\n", __FUNCTION__,
++				HX836x_MIN_CONTRAST_LEVEL, HX836x_MAX_CONTRAST_LEVEL);
++		return -1;
++	}
++
++	r = hx836x_panel_adjust_contrast(dssdev, contrast_level);
++	if(r)
++		return r;
++
++	hx836x_contrast_level = contrast_level;
++	return size;
++
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access contrast_conf_value sysfs
++   attribute.
++
++  \Purpose:
++   This attribute would help user to know contrast configuration values such as
++   Default value, Minimum value and Maximum value which is currently supported
++   by this driver.
++   Attribute usage, just
++   cat /sys/devices/platform/omapdss/display0/contrast_conf_value
++   to show contrast config values supported by this driver.
++   This attribute is useful to user to know the contrast levels when try to adjust
++   cotrast using adjust_contrast attribute.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to print contrast config values using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_show_contrast_conf_value(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++        return snprintf(buf, PAGE_SIZE, "\nDefault Val = %d  Min Val = %d  Max Val = %d\n",
++			HX836x_DEFAULT_CONTRAST_LEVEL, HX836x_MIN_CONTRAST_LEVEL, HX836x_MAX_CONTRAST_LEVEL);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access adjust_gamma sysfs attribute.
++
++  \Purpose:
++   This attribute would help user to know gamma level is being currently set.
++   Attribute usage, just
++   cat /sys/devices/platform/omapdss/display0/adjust_gamma
++   to show current gamma level.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to print current gamma level using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_show_gamma(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++        return snprintf(buf, PAGE_SIZE, "%d\n", hx836x_gamma_level);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access adjust_gamma sysfs attribute.
++
++  \Purpose:
++   This attribute is used to adjust gamma levels.
++   Attribute usage, just
++   echo level > /sys/devices/platform/omapdss/display0/adjust_gamma
++   to change gamma levels.
++   Use gamma_conf_value attribute to know the supported levels.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [in] buf
++   It is of type char pointer.It is an input buffer and used to retrieve the user
++   input gamma level
++
++  \param [in] size
++   It is of type ssize_t and which gives size of characters written into input buf
++
++
++  \return size of characters written into to input buf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_store_gamma(struct device *dev,
++                struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++	int r = 0, gamma_level;
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++	r = kstrtoint(buf, 0, &gamma_level);
++        if (r)
++                return r;
++
++	if(gamma_level < HX836x_MIN_GAMMA_LEVEL && gamma_level > HX836x_MIN_GAMMA_LEVEL) {
++		pr_err("%s  : Error level %d not supported\n", __FUNCTION__, gamma_level);
++		pr_info("%s : Supported gamma levels are from %d to %d\n", __FUNCTION__,
++				HX836x_MIN_GAMMA_LEVEL, HX836x_MAX_GAMMA_LEVEL);
++		return -1;
++	}
++
++	r = hx836x_panel_adjust_gamma(dssdev, gamma_level);
++	if(r)
++		return r;
++
++	hx836x_gamma_level = gamma_level;
++	return size;
++
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access gamma_conf_value sysfs
++   attribute.
++
++  \Purpose:
++   This attribute would help user to know gamma configuration values such as
++   Default value, Minimum value and Maximum value which is currently supported
++   by this driver.
++   Attribute usage, just
++   cat /sys/devices/platform/omapdss/display0/gamma_conf_value
++   to show gamma conf values supported by this driver.
++   This attribute is useful to user to know the gamma levels when try to adjust
++   gamma using adjust_gamma attribute.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to print gamma config values using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_show_gamma_conf_value(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++	struct omap_dss_device *dssdev = to_dss_device(dev);
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++        return snprintf(buf, PAGE_SIZE, "\nDefault Val = %d  Min Val = %d  Max Val = %d\n",
++			HX836x_DEFAULT_GAMMA_LEVEL, HX836x_MIN_GAMMA_LEVEL, HX836x_MAX_GAMMA_LEVEL);
++}
++
++/*******************************************************************************/
++/*!
++  \brief This function is called when user access lcd_panel_type sysfs attribute.
++
++  \Purpose:
++   There are two types of lcd display used here. One is HX8363 and another
++   is HX8369. This attribute would help user to find the lcd panel currently
++   used.
++   Attribute usage, just
++   cat /sys/devices/platform/omapdss/display0/lcd_panel_type
++   to show panel type.
++
++  \param [in] dev
++   It is of type struct device and could be used to get omap_dss_device
++   structure that is used to return panel information
++
++  \param [in] attr
++   It is of type struct device_attribute
++
++  \param [out] buf
++   It is of type char pointer and it is used to print the lcd type using
++   snprintf
++
++  \return size of characters written into to buf using snprintf on success.
++   Upon failure, the function returns errno.
++*/
++/*******************************************************************************/
++
++static ssize_t display_show_lcd_panel_type(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++        struct omap_dss_device *dssdev = to_dss_device(dev);
++        char panel[25];
++
++        if (spidev == NULL){
++                pr_err("%s: SPI interface unconfigured\n", __FUNCTION__);
++                return -1;
++        }
++
++        if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
++                pr_err("%s: dssdev->state is not active in \n", __FUNCTION__);
++                return -1;
++        }
++
++        if(panel_type == LCD_PANEL_YET_TO_DETECT) {
++                panel_type = detect_lcd_panel();
++                msleep(50);
++        }
++
++        if(panel_type == LCD_PANEL_HIMAX_HX8363)
++                strcpy(panel, "LCD_PANEL_HIMAX_HX8363");
++        else if(panel_type == LCD_PANEL_HIMAX_HX8369)
++                strcpy(panel, "LCD_PANEL_HIMAX_HX8369");
++        else
++                strcpy(panel, "LCD_PANEL_HIMAX_UNKNOWN");
++
++        return snprintf(buf, PAGE_SIZE, "%s\n", panel);
++}
++
++/*******************************************************************************/
++/*!
++  \brief Intialising dev sysfs attributes like gamma adjusts, contrast adjusts,
++   spi read and spi write, lcd type
++
++  \Purpose:
++   sysfs attributes are used to access or to control device specific
++   configurations from user space. The below attributes could be found
++   under /sys/devices/platform/omapdss/display0/ path once system booted.
++*/
++/*******************************************************************************/
++
++static DEVICE_ATTR(adjust_contrast, S_IRUGO | S_IWUSR,
++                display_show_contrast, display_store_contrast);
++static DEVICE_ATTR(contrast_conf_value, S_IRUGO | S_IWUSR,
++                display_show_contrast_conf_value, NULL);
++static DEVICE_ATTR(adjust_gamma, S_IRUGO | S_IWUSR,
++                display_show_gamma, display_store_gamma);
++static DEVICE_ATTR(gamma_conf_value, S_IRUGO | S_IWUSR,
++                display_show_gamma_conf_value, NULL);
++static DEVICE_ATTR(spi_read, S_IRUGO | S_IWUSR,
++                NULL, sysfs_spi_read);
++static DEVICE_ATTR(spi_read_data, S_IRUGO | S_IWUSR,
++                sysfs_show_spi_read_data, NULL);
++static DEVICE_ATTR(spi_write, S_IRUGO | S_IWUSR,
++                NULL, sysfs_spi_write);
++static DEVICE_ATTR(lcd_panel_type, S_IRUGO | S_IWUSR,
++                display_show_lcd_panel_type, NULL);
++
++static struct device_attribute *himax_hx836x_sysfs_attrs[] = {
++	&dev_attr_adjust_contrast,
++	&dev_attr_contrast_conf_value,
++	&dev_attr_adjust_gamma,
++	&dev_attr_gamma_conf_value,
++	&dev_attr_spi_read,
++	&dev_attr_spi_read_data,
++	&dev_attr_spi_write,
++	&dev_attr_lcd_panel_type,
++	NULL
++};
++
+ /*******************************************************************************/
+ /*!
+   \brief Panel probe called by DSS during system boot up
+@@ -80,10 +1152,22 @@ struct omap3logic_panel omap3logic_default_panel = {
+ /*******************************************************************************/
+ static int hx8369_panel_probe(struct omap_dss_device *dssdev)
+ {
+-        dssdev->panel.config = omap3logic_default_panel.config;
++	struct device_attribute *attr;
++	int i = 0, ret = 0;
++
++	dssdev->panel.config = omap3logic_default_panel.config;
+         dssdev->panel.acb = 0x0;
+         dssdev->panel.timings = omap3logic_default_panel.timing;
+-
++	hx836x_contrast_level = HX836x_DEFAULT_CONTRAST_LEVEL;
++	hx836x_gamma_level    = HX836x_DEFAULT_GAMMA_LEVEL;
++
++	/* Registring sysfs attributes */
++        while ((attr = himax_hx836x_sysfs_attrs[i++]) != NULL) {
++                ret = device_create_file(&dssdev->dev, attr);
++                if (ret)
++                        pr_err("%s: Failed to create sysfs file %s\n",
++					__FUNCTION__, attr->attr.name);
++        }
+         return 0;
+ }
+ 
+@@ -102,6 +1186,13 @@ static int hx8369_panel_probe(struct omap_dss_device *dssdev)
+ /*******************************************************************************/
+ static void hx8369_panel_remove(struct omap_dss_device *dssdev)
+ {
++        struct device_attribute *attr;
++        int i = 0;
++
++	/* Deregistring sysfs attributes */
++        while ((attr = himax_hx836x_sysfs_attrs[i++]) != NULL) {
++                device_remove_file(&dssdev->dev, attr);
++        }
+ }
+ 
+ /*******************************************************************************/
+@@ -143,7 +1234,7 @@ static int hx8369_write_reg(u8 reg, u8 num, ...)
+         };
+         struct spi_transfer value_xfer[num];
+ 
+-        u16	buffer[132];
++        u16 buffer[132];
+ 
+         if ((num+1) > ARRAY_SIZE(buffer)) {
+ 		printk(KERN_ERR "%s buffer is too short %d vs %d\n",
+@@ -171,7 +1262,7 @@ static int hx8369_write_reg(u8 reg, u8 num, ...)
+ 			value_xfer[i].speed_hz = 50000;
+ 			spi_message_add_tail(&value_xfer[i], &msg);
+ 		}
+-		
++
+ 		va_end(args);
+ 	}
+         return spi_sync(spidev, &msg);
+@@ -197,7 +1288,7 @@ static int hx8369_write_reg(u8 reg, u8 num, ...)
+ 
+   \param [out] read_buffer
+   A buffer of 'num' parameter size, to which read data will be stored
+- 
++
+   \param [in] is_reg_command
+   This value indicates whether 'reg' parameter is a register address or direct command
+ 
+@@ -209,39 +1300,42 @@ static int hx8369_write_reg(u8 reg, u8 num, ...)
+ static int econ_hx8369_read_reg(u8 reg, u8 n_rx_bytes, u8 *read_buffer,u8 is_reg_command)
+ {
+ 	u8 len=0;
+-	int ret=0,i=0;
++	u16 *spi_tx_buf;
++	u8 *spi_rx_buf = NULL;
++	int ret=0;
+         struct spi_transfer value_xfer[100];
+-	u16 *spi_tx_buf = (u16 *)kzalloc(100,GFP_KERNEL);
++	struct spi_message m;
++	struct spi_transfer t = {
++	.rx_buf = spi_rx_buf,
++	.len = 2,
++	.cs_change = 0,
++	.speed_hz = 50000,
++	.bits_per_word = 9,
++	};
++
++	spi_tx_buf = (u16 *)kzalloc(3, GFP_KERNEL);
+ 	if(!spi_tx_buf)
+ 	{
+ 		printk("FUNC %s LINE %d: Failed to allocate memory for spi_tx_buf \n",__FUNCTION__,__LINE__);
+ 		return -ENOMEM;
+ 	}
+-	u8 *spi_rx_buf = (u8 *)kzalloc(100,GFP_KERNEL);
++
++	spi_rx_buf = (u8 *)kzalloc((n_rx_bytes + 1), GFP_KERNEL);
+ 	if(!spi_rx_buf)
+ 	{
+ 		printk("FUNC %s LINE %d: Failed to allocate memory for spi_rx_buf \n",__FUNCTION__,__LINE__);
+ 		if(spi_tx_buf) kfree(spi_tx_buf);
+ 		return -ENOMEM;
+ 	}
+-	struct spi_transfer t = {
+-	.rx_buf = spi_rx_buf,
+-	.len = 2,
+-	.cs_change = 0,
+-	.speed_hz = 50000,
+-	.bits_per_word = 9,
+-	};
+- 
+ 
+-	struct spi_message m;
+ 	spi_message_init(&m);
+ 	memset(value_xfer,0,sizeof(value_xfer));
+ 
+ 	if(!is_reg_command)
+ 	{
+ 		// Send Command
+-		spi_tx_buf[0] = 0xFE; // SET SPI READ INDEX
+- 	        t.tx_buf = spi_tx_buf;
++		spi_tx_buf[0] = HX836X_SET_SPIREAD_IX; // SET SPI READ INDEX
++	        t.tx_buf = spi_tx_buf;
+ 		t.len = 2;
+ 		t.cs_change = 0,
+ 		t.bits_per_word = 9;
+@@ -262,7 +1356,7 @@ static int econ_hx8369_read_reg(u8 reg, u8 n_rx_bytes, u8 *read_buffer,u8 is_reg
+ 		len += value_xfer[0].len;
+ 
+ 		// Send Command
+-		spi_tx_buf[2] = 0xFF; // SPIREAD
++		spi_tx_buf[2] = HX836X_GET_SPIREAD; // SPIREAD
+ 		value_xfer[1].len = 2;
+ 		value_xfer[1].cs_change = 0,
+ 		value_xfer[1].bits_per_word = 9;
+@@ -311,18 +1405,12 @@ static int econ_hx8369_read_reg(u8 reg, u8 n_rx_bytes, u8 *read_buffer,u8 is_reg
+ 	if (ret)
+ 		dev_err(&spidev->dev, "spi transfer failed: ret = %d\n", ret);
+ 
+-	for(i=0;i<len;i++)
+-	{
+-		printk("FUNC %s LINE %d: spi_tx_buf[%d] = 0x%04X spi_rx_buf[%d] = 0x%02X \n",__FUNCTION__,__LINE__,i,spi_tx_buf[i],i,spi_rx_buf[i]);
+-	}
+- 
+-	memcpy(read_buffer,spi_rx_buf,n_rx_bytes);
++	memcpy(read_buffer, spi_rx_buf, n_rx_bytes);
++
+ 	kfree(spi_tx_buf);
+ 	kfree(spi_rx_buf);
+-	spi_tx_buf=NULL;
+-	spi_rx_buf=NULL;
+-	return ret;
+ 
++	return ret;
+ }
+ 
+ /*******************************************************************************/
+@@ -355,7 +1443,7 @@ static int hx8369_panel_pre_enable(struct omap_dss_device *dssdev)
+ }
+ 
+ /*******************************************************************************/
+-/* 
++/*
+  * Read IDs from LCD module
+  * This function returns one of the followings
+  *  LCD_PANEL_HIMAX_HX8363 when LCD module HX8363 is interfaced to uP
+@@ -364,20 +1452,19 @@ static int hx8369_panel_pre_enable(struct omap_dss_device *dssdev)
+  */
+ /*******************************************************************************/
+ 
+-int detect_lcd_panel(void)
++static int detect_lcd_panel(void)
+ {
+-	int i=0;
+-	int r=0;
+-	u8 reg_read_buf[2048];
++	int r = 0;
++	u8 reg_read_buf[3];
+ 
+ 	// Send Command SETEXT with parameters for LCD module HX8363
+-	r = hx8369_write_reg(0xb9,3,0xff,0x83,0x69); 
++	r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x69);
+         if (r) return r;
+ 	// Clear read buffer
+ 	memset(reg_read_buf,128,0x00);
+ 	// Read IDs from regsiter 0xB9
+-	econ_hx8369_read_reg(0xB9,3,reg_read_buf,0);
+-	if(reg_read_buf[2]==0x69)
++	econ_hx8369_read_reg(HX8369_GETHXID, 3, reg_read_buf, 0);
++	if(reg_read_buf[0]==0x69)
+ 	{
+ 		printk("Detected LCD panel is HX8369 \n");
+ 		return LCD_PANEL_HIMAX_HX8369;
+@@ -385,12 +1472,12 @@ int detect_lcd_panel(void)
+ 	else
+ 	{
+ 		// Send Command SETEXT with parameters for LCD module HX8363
+-		r = hx8369_write_reg(0xb9,3,0xff,0x83,0x63); 
++		r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND, 3, 0xff, 0x83, 0x63);
+ 	        if (r) return r;
+ 		// Clear read buffer
+-		memset(reg_read_buf,128,0x00);
++		memset(reg_read_buf, 128, 0x00);
+ 		// Read IDs from regsiter 0xB9
+-		econ_hx8369_read_reg(0xB9,3,reg_read_buf,0);
++		econ_hx8369_read_reg(HX836X_SET_EXTENSION_COMMAND, 3, reg_read_buf, 0);
+ 		if(reg_read_buf[2]==0x63)
+ 		{
+ 			printk("Detected LCD panel is HX8363 \n");
+@@ -434,7 +1521,7 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+                 return -1;
+         }
+ 
+-    	if (dssdev->state == OMAP_DSS_DISPLAY_ACTIVE) {
++	if (dssdev->state == OMAP_DSS_DISPLAY_ACTIVE) {
+                 return 0;
+         }
+ 
+@@ -446,8 +1533,9 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ 	if(enable_count==0)
+ 	{
+ 		enable_count++;
+-        	dssdev->state = OMAP_DSS_DISPLAY_ACTIVE;
+-		pr_info("No need to configure himax at first time only . Because It is already configured in xboot. \n");
++		dssdev->state = OMAP_DSS_DISPLAY_ACTIVE;
++		pr_info("No need to configure himax at first time only. "
++			"Because It is already configured in xboot. \n");
+ 		return 0;
+ 	}
+ 	else
+@@ -460,11 +1548,11 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ 		}
+ 	}
+ #endif
+-        
++
+         pr_info("himax_hx8369: panel_enable: 0x%08x\n", (unsigned int)spidev);
+         /* wait couple of vsyncs until enabling the LCD */
+         msleep(50);
+-        
++
+         if (dssdev->platform_enable)
+                 r = dssdev->platform_enable(dssdev);
+ 
+@@ -473,72 +1561,72 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ 
+ 		case LCD_PANEL_HIMAX_HX8369:
+ 		{
+-        		/* Panel init sequence taken from page 23 of the 
++			/* Panel init sequence taken from page 23 of the
+ 			 * Truly TFT480800-63-E application note version 0.1 Feb 9, 2012
+ 			*/
+-			printk("panel is LCD_PANEL_HIMAX_HX8369 \n");
++			printk("Panel is LCD_PANEL_HIMAX_HX8369 \n");
+ 			// Send SETEXTC command
+-		        r = hx8369_write_reg(0xb9,3,0xff,0x83,0x69); 
+-        		if (r) return r;
++		        r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND,3,0xff,0x83,0x69);
++			if (r) return r;
+ 			// Set Power
+-        		r = hx8369_write_reg(0xB1,19, 
++			r = hx8369_write_reg(HX836X_SETPOWER,19,
+ 					     0x85, 0x00, 0x34, 0x07, 0x00, 0x0F, 0x0F, 0x2A,
+ 					     0x32, 0x3F, 0x3F,
+-		      	//update VBIAS
++			//update VBIAS
+ 				     0x01, 0x3A, 0x01, 0xE6, 0xE6, 0xE6, 0xE6, 0xE6);
+-        		if (r) return r;
++			if (r) return r;
+ 
+-		 	//Sleep Out	
+-			r = hx8369_write_reg(0x11,0);
+-	        	if (r) return r;
++			//Sleep Out
++			r = hx8369_write_reg(HX836X_SLPOUT,0);
++			if (r) return r;
+ 
+ 			//Delay for 125milli seconds
+ 			for(i=0;i<125;i++)
+ 			{
+ 				udelay((1000));
+ 			}
+- 
++
+ 
+ 			// SET Display  480x800
+-			r = hx8369_write_reg(0xB2, 15, 
+-					     0x00, 0x28, 0x05, 0x05, 0x70, 0x00, 0xFF, 0x00, 
+-					     0x00, 0x00, 0x00, 0x03, 0x03, 0x00, 0x01); 
+-	        	if (r) return r;
++			r = hx8369_write_reg(HX8369_SETDISP, 15,
++					     0x00, 0x28, 0x05, 0x05, 0x70, 0x00, 0xFF, 0x00,
++					     0x00, 0x00, 0x00, 0x03, 0x03, 0x00, 0x01);
++			if (r) return r;
+ 
+ 			/* SETRGBIF DPL:0 HSPL:0 VSPL:0 EPL:1 */
+-			r = hx8369_write_reg(0xb3,1,0x1); 
++			r = hx8369_write_reg(HX836X_SETRGBIF,1,0x1);
+ 			if (r) return r;
+-	
++
+ 			// SETCYC
+-			r = hx8369_write_reg(0xB4,5, 
+-					     0x00, 0x18, 0x80, 0x06, 0x02);  
++			r = hx8369_write_reg(HX836X_SETCYC,5,
++					     0x00, 0x18, 0x80, 0x06, 0x02);
+ 		        if (r) return r;
+-	
++
+ 			// SETVCOM
+-			r = hx8369_write_reg(0xB6, 2, 0x42, 0x42);  
+-	        	if (r) return r;
+-	
++			r = hx8369_write_reg(HX836X_SETVCOM, 2, 0x42, 0x42);
++			if (r) return r;
++
+ 			//SETGIP
+-			r = hx8369_write_reg(0xD5, 26, 
+-					     0x00, 0x04, 0x03, 0x00, 0x01, 0x05, 0x28, 0x70, 
+-					     0x01, 0x03, 0x00, 0x00, 0x40, 0x06, 0x51, 0x07, 
+-					     0x00, 0x00, 0x41, 0x06, 0x50, 0x07, 0x07, 0x0F, 
+-					     0x04, 0x00);  
+-        		if (r) return r;
+-      
+-			// SETGAMMA - Gamma2.2 
+-			r = hx8369_write_reg(0xE0, 34, 
+-					     0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28, 0x46, 
+-					     0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F, 
+-					     0x17, 0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28, 
+-					     0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 
+-					     0x0F, 0x17); 
+-        		if (r) return r;
++			r = hx8369_write_reg(HX8369_SETGIP, 26,
++					     0x00, 0x04, 0x03, 0x00, 0x01, 0x05, 0x28, 0x70,
++					     0x01, 0x03, 0x00, 0x00, 0x40, 0x06, 0x51, 0x07,
++					     0x00, 0x00, 0x41, 0x06, 0x50, 0x07, 0x07, 0x0F,
++					     0x04, 0x00);
++			if (r) return r;
++//#if 0
++			//SETGAMMA - Gamma2.2
++			r = hx8369_write_reg(HX836X_SETGAMMA, 34,
++					     0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28, 0x46,
++					     0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14, 0x0F,
++					     0x17, 0x00, 0x13, 0x19, 0x38, 0x3D, 0x3F, 0x28,
++					     0x46, 0x07, 0x0D, 0x0E, 0x12, 0x15, 0x12, 0x14,
++					     0x0F, 0x17);
++			if (r) return r;
+ 
+ 			msleep(10);
+-	
++//#endif
+ 			// SETDGCLUT
+-	        	r = hx8369_write_reg(0xC1, 127, 0x01,
++			r = hx8369_write_reg(HX836X_SETDGCLUT, 127, 0x01,
+ 					     //R
+ 					     0x04, 0x13, 0x1a, 0x20, 0x27, 0x2c, 0x32, 0x36,
+ 					     0x3f, 0x47, 0x50, 0x59, 0x60, 0x68, 0x71, 0x7B,
+@@ -559,120 +1647,119 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ 					     0x82, 0x89, 0x91, 0x98, 0xA0, 0xA8, 0xB0, 0xB8,
+ 					     0xC1, 0xC9, 0xD0, 0xD7, 0xE0, 0xE7, 0xEF, 0xF7,
+ 					     0xFE, 0xCF, 0x52, 0x34, 0xF8, 0x51, 0xF5, 0x9D,
+-					     0x75, 0x00); 
++					     0x75, 0x00);
+ 
+ 			msleep(10);
+ 
+ 			//Set_tear_on
+-			r = hx8369_write_reg(0x35, 1, 0x00);
+-	        	if (r) return r;
+-		
++			r = hx8369_write_reg(HX8369_TEON, 1, 0x00);
++			if (r) return r;
++
+ 			// Set_pixel_format
+-			r = hx8369_write_reg(0x3A, 1, 0x77);   
++			r = hx8369_write_reg(HX836X_COLMOD, 1, 0x77);
+ 		        if (r) return r;
+ 
+ 			//Exit_sleep_mode
+-			r = hx8369_write_reg(0x11, 0);
+-        		if (r) return r;
+-	
++			r = hx8369_write_reg(HX836X_SLPOUT, 0);
++			if (r) return r;
++
+ 			udelay(1000);
+-	
++
+ 			//Set_display_on
+-			r = hx8369_write_reg(0x29,0);  
+-	        	if (r) return r;
++			r = hx8369_write_reg(HX836X_DISPON,0);
++			if (r) return r;
+ 
+ 			//Write_memory_start
+-			r = hx8369_write_reg(0x2C,0); 
+-        		if (r) return r;
++			r = hx8369_write_reg(HX8369_RAMWR,0);
++			if (r) return r;
+ 
+ 			udelay(1000);
+ 		} // LCD_PANEL_HIMAX_HX8369
+ 		break;
+ 		case LCD_PANEL_HIMAX_HX8363:
+ 		{
+-			/* LCD Init Sequence as mentioned in the Truly LCD MODULE Application Note Version:0.3  2014-01-24 
++			/* LCD Init Sequence as mentioned in the Truly LCD MODULE Application Note Version:0.3  2014-01-24
+ 			* (TDO-WVGA0347F00029-E Application Note V0.3.doc)
+- 			*/
+-			printk("panel is LCD_PANEL_HIMAX_HX8363 \n");
++			*/
++			printk("Panel is LCD_PANEL_HIMAX_HX8363 \n");
+ 			// Send SETEXTC command
+-			r = hx8369_write_reg(0xb9,3,0xff,0x83,0x63); 
++			r = hx8369_write_reg(HX836X_SET_EXTENSION_COMMAND,3,0xff,0x83,0x63);
+ 		        if (r) return r;
+-	
++
+ 			// Set Power
+-			r = hx8369_write_reg(0xB1,12, 
+-					0x81, 0x32, 0x08, 0x33, 0x01, 0x13, 0x0D, 0x0D,
+-					0x12, 0x16, 0x1E,0x1E);
++			r = hx8369_write_reg(HX836X_SETPOWER,12,
++					0x81, 0x30, 0x05, 0x32, 0x01, 0x13, 0x0D, 0x0D,
++					0x22, 0x22, 0x1E,0x1E);
+ 		        if (r) return r;
+-	
+-		
++
++
+ 			//Memory Access Control
+-			r = hx8369_write_reg(0x36,1,0x02);
++			r = hx8369_write_reg(HX836X_MADCTL,1,0x02);
+ 		        if (r) return r;
+ 
+ 			// COLMOD
+-			r = hx8369_write_reg(0x3A,1,0x70);
++			r = hx8369_write_reg(HX836X_COLMOD,1,0x70);
+ 		        if (r) return r;
+ 
+ 
+ 			//Set_RGBIF
+-			r = hx8369_write_reg(0xB3,1,0x01);
++			r = hx8369_write_reg(HX836X_SETRGBIF,1,0x01);
+ 		        if (r) return r;
+ 
+ 
+ 			//Set_CYC CPT
+-			r = hx8369_write_reg(0xB4,11,0x08,0x03,0xe0,0x30,0x01,0x12,0x64,0x01,0xff,0x00,0x00);
++			r = hx8369_write_reg(HX836X_SETCYC,11,0x00,0x03,0xe0,0x30,0x01,0x12,0x64,0x01,0xff,0x00,0x00);
+ 		        if (r) return r;
+ 
+ 
+ 			//Set_VCOM
+-			r = hx8369_write_reg(0xB6,1,0x10);
++			r = hx8369_write_reg(HX836X_SETVCOM,1,0x15);
+ 		        if (r) return r;
+ 
+ 
+ 			//Set_Panel
+-			r = hx8369_write_reg(0xCC,1,0x03);
++			r = hx8369_write_reg(HX836X_SETPANEL,1,0x03);
+ 		        if (r) return r;
+ 
+ 			//Delay for 5milli seconds
+ 			mdelay(5);
+ 
+-			//Gamma 2.2 
+-			r = hx8369_write_reg(0xE0,30,
+-						0x00,0x9E,0x63,0x72,0x36,0x3F,0x25,0xD6,0x0C,0x93,
+-						0x58,0x15,0x78,0xBF,0x19,0x00,0x9E,0x63,0x72,0x36,
+-						0x3F,0x25,0xD6,0x0C,0x93,0x58,0x15,0x78,0xBF,0x19);
++			//Gamma 2.2
++			r = hx8369_write_reg(HX836X_SETGAMMA, 30,
++					0x00,0x4F,0x5F,0x72,0x33,0x2F,0x80,0x89,0x0E,0xD0,0x52,0x11,0x14,0x57,0x1C,
++					0x00,0x4F,0x5F,0x72,0x33,0x2F,0x80,0x89,0x0E,0xD0,0x52,0x11,0x14,0x57,0x1C);
+ 		        if (r) return r;
+ 
+ 			//Delay for 5milli seconds
+ 			mdelay(5);
+ 
+-			//DGC
+-			r = hx8369_write_reg(0xC1,127,0x01,
++			//DGC - DGC should be disabled for 8363
++			r = hx8369_write_reg(HX836X_SETDGCLUT,127,0x00,
+ 					0x06,0x0D,0x1E,0x2F,0x3F,0x51,0x60,0x71,0x80,0x8B,
+ 					0x95,0x9F,0xA8,0xB1,0xBD,0xC8,0xCE,0xD5,0xDB,0xE1,
+ 					0xE4,0xE7,0xEB,0xEE,0xF0,0xF2,0xF4,0xF7,0xF8,0xFA,
+ 					0xFC,0xFD,0xFF,0xB1,0xDE,0xAE,0x90,0xDB,0x20,0xFC,
+ 					0xA2,0x02,
+-				
++
+ 					0x06,0x0D,0x1E,0x2F,0x3F,0x51,0x60,0x71,0x80,0x8B,
+ 					0x95,0x9F,0xA8,0xB1,0xBD,0xC8,0xCE,0xD5,0xDB,0xE1,
+ 					0xE4,0xE7,0xEB,0xEE,0xF0,0xF2,0xF4,0xF7,0xF8,0xFA,
+ 					0xFC,0xFD,0xFF,0xB1,0xDE,0xAE,0x90,0xDB,0x20,0xFC,
+ 					0xA2,0x02,
+-			
++
+ 					0x06,0x0D,0x1E,0x2F,0x3F,0x51,0x60,0x71,0x80,0x8B,
+ 					0x95,0x9F,0xA8,0xB1,0xBD,0xC8,0xCE,0xD5,0xDB,0xE1,
+ 					0xE4,0xE7,0xEB,0xEE,0xF0,0xF2,0xF4,0xF7,0xF8,0xFA,
+ 					0xFC,0xFD,0xFF,0xB1,0xDE,0xAE,0x90,0xDB,0x20,0xFC,
+ 					0xA2,0x02);
+-	        	if (r) return r;
++			if (r) return r;
+ 
+ 
+ 			//Delay for 5milli seconds
+ 			mdelay(5);
+-		
+-			//Sleep Out	
+-			r = hx8369_write_reg(0x11,0);
++
++			//Sleep Out
++			r = hx8369_write_reg(HX836X_SLPOUT,0);
+ 		        if (r) return r;
+ 
+ 			//Delay for 125milli seconds
+@@ -681,9 +1768,9 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ 				udelay((1000));
+ 			}
+ 
+-			//Set_Panel
+-			r = hx8369_write_reg(0x29,0);
+-	        	if (r) return r;
++			//Set_Display ON
++			r = hx8369_write_reg(HX836X_DISPON,0);
++			if (r) return r;
+ 			udelay(1000);
+ 		} // LCD_PANEL_HIMAX_HX8363
+ 		break;
+@@ -717,17 +1804,17 @@ static int hx8369_panel_enable(struct omap_dss_device *dssdev)
+ static void hx8369_panel_disable(struct omap_dss_device *dssdev)
+ {
+         pr_info("himax_hx8369: panel_disable: 0x%08x\n", (unsigned int)spidev);
+-	
++
+         if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE)
+                 return;
+ 
+-        hx8369_write_reg(0x10, 0);
++        hx8369_write_reg(HX836X_SLPIN, 0);
+ 	//Add use internal oscillator
+-        hx8369_write_reg(0xC1, 1, 0x02);
++        hx8369_write_reg(HX836X_SETDGCLUT, 1, 0x02);
+ 	//msleep(200);
+ 	udelay(1000);
+ 	//Add use internal oscillator
+-        hx8369_write_reg(0xC1, 1, 0x01);
++        hx8369_write_reg(HX836X_SETDGCLUT, 1, 0x01);
+ 	//LcdEnvidOnOff(0);
+ 
+         //msleep(150);
+@@ -889,7 +1976,7 @@ static struct spi_driver hx8369_spi_driver = {
+ /*******************************************************************************/
+ static int __init hx8369_panel_drv_init(void)
+ {
+-        int ret;
++        int ret = 0;
+ 
+         ret = spi_register_driver(&hx8369_spi_driver);
+         if (ret != 0) {
+@@ -904,6 +1991,7 @@ static int __init hx8369_panel_drv_init(void)
+                 }
+         }
+ 
++
+         return ret;
+ }
+ 
+-- 
+1.7.1
+

@@ -1,0 +1,45 @@
+From ee4a8df7eba42378aa84dc5089e6ee1d035be75f Mon Sep 17 00:00:00 2001
+From: Mohamed Thalib H <mohamed@e-consystems.com>
+Date: Mon, 9 Jun 2014 15:53:18 +0530
+Subject: [PATCH 7/8] Changed NAND timings Signed-off-by: Mohamed Thalib H
+ <mohamed@e-consystems.com>
+
+---
+ arch/arm/mach-omap2/board-omap3logic.c |   14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/mach-omap2/board-omap3logic.c b/arch/arm/mach-omap2/board-omap3logic.c
+index 89f8846..9599155 100644
+--- a/arch/arm/mach-omap2/board-omap3logic.c
++++ b/arch/arm/mach-omap2/board-omap3logic.c
+@@ -1398,9 +1398,9 @@ static void omap3logic_nand_timigs_init(void)
+ 	gpmc_write_reg(0x60, 0x1800);
+ 	gpmc_write_reg(0x64, 0x90900);
+ 	gpmc_write_reg(0x68, 0x90900);
+-	gpmc_write_reg(0x6C, 0x7020702);
+-	gpmc_write_reg(0x70, 0x8080A);
+-	gpmc_write_reg(0x74, 0x2CF);
++	gpmc_write_reg(0x6C, 0x6000700);
++	gpmc_write_reg(0x70, 0x70c0c);
++	gpmc_write_reg(0x74, 0xfCF);
+ 	gpmc_write_reg(0x78, 0xF70);
+ 	gpmc_write_reg(0x84, 0x0);
+ 
+@@ -1408,10 +1408,10 @@ static void omap3logic_nand_timigs_init(void)
+ 	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG1, 0x00001800);
+ 	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG2, 0x00090900);
+ 	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG3, 0x00090900);
+-	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG4, 0x07020702);
+-	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG5, 0x0008080A);
+-	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG6, 0x000002CF);
+-	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG7, 0x00000C70);
++	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG4, 0x06000700);
++	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG5, 0x00070c0c);
++	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG6, 0x00000fCF);
++	gpmc_cs_write_reg(NAND_CS, GPMC_CS_CONFIG7, 0x00000f70);
+ }
+ 
+ #include "board-flash.h"
+-- 
+1.7.9.5
+

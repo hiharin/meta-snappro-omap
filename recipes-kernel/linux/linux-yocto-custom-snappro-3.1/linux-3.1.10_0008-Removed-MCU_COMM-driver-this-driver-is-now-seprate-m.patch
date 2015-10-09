@@ -1,0 +1,2581 @@
+From 5e8629b274539b76e8446bcfa660169efca85bfa Mon Sep 17 00:00:00 2001
+From: Mohamed Thalib H <mohamed@e-consystems.com>
+Date: Thu, 10 Jul 2014 13:10:59 +0530
+Subject: [PATCH 8/8] Removed MCU_COMM driver, this driver is now seprate
+ module Signed-off-by: Mohamed Thalib H
+ <mohamed@e-consystems.com>
+
+---
+ drivers/char/Kconfig             |    1 -
+ drivers/tty/Makefile             |    1 -
+ drivers/tty/mcu_comm/Kconfig     |   14 -
+ drivers/tty/mcu_comm/Makefile    |    3 -
+ drivers/tty/mcu_comm/idexxmcu.c  |  226 -----
+ drivers/tty/mcu_comm/proto.c     | 1860 --------------------------------------
+ drivers/tty/mcu_comm/proto.h     |  276 ------
+ drivers/tty/mcu_comm/workArray.h |   87 --
+ include/linux/idexxmcu_ioctl.h   |    5 +-
+ 9 files changed, 3 insertions(+), 2470 deletions(-)
+ delete mode 100644 drivers/tty/mcu_comm/Kconfig
+ delete mode 100644 drivers/tty/mcu_comm/Makefile
+ delete mode 100644 drivers/tty/mcu_comm/idexxmcu.c
+ delete mode 100644 drivers/tty/mcu_comm/proto.c
+ delete mode 100644 drivers/tty/mcu_comm/proto.h
+ delete mode 100644 drivers/tty/mcu_comm/workArray.h
+
+diff --git a/drivers/char/Kconfig b/drivers/char/Kconfig
+index a4aeade..883aff6 100644
+--- a/drivers/char/Kconfig
++++ b/drivers/char/Kconfig
+@@ -627,7 +627,6 @@ config TILE_SROM
+ 	  device appear much like a simple EEPROM, and knows
+ 	  how to partition a single ROM for multiple purposes.
+ 
+-source "drivers/tty/mcu_comm/Kconfig"
+ 
+ endmenu
+ 
+diff --git a/drivers/tty/Makefile b/drivers/tty/Makefile
+index dfebb15..9eda99e 100644
+--- a/drivers/tty/Makefile
++++ b/drivers/tty/Makefile
+@@ -29,4 +29,3 @@ obj-$(CONFIG_SYNCLINK)		+= synclink.o
+ 
+ obj-y += ipwireless/
+ 
+-obj-y				+= mcu_comm/
+diff --git a/drivers/tty/mcu_comm/Kconfig b/drivers/tty/mcu_comm/Kconfig
+deleted file mode 100644
+index a5f1b9c..0000000
+--- a/drivers/tty/mcu_comm/Kconfig
++++ /dev/null
+@@ -1,14 +0,0 @@
+-menu "MCU Communication"
+-
+-config IDEXX_MCU
+-	tristate "Idexx MCU Communication Protocol for TTY"
+-	default m
+-	help
+-	   This option enables the IDEXX MCU protocol for kernel-based
+-	   devices like TTY.  It interfaces between a raw TTY, and the
+-	   serial port (UART) driver.
+-
+-	   This driver can also be built as a module.  If so, the module
+-	   will be called idexx-mcu.
+-
+-endmenu
+diff --git a/drivers/tty/mcu_comm/Makefile b/drivers/tty/mcu_comm/Makefile
+deleted file mode 100644
+index a384988..0000000
+--- a/drivers/tty/mcu_comm/Makefile
++++ /dev/null
+@@ -1,3 +0,0 @@
+-obj-$(CONFIG_IDEXX_MCU)	+= idexx-mcu.o
+-
+-idexx-mcu-objs = idexxmcu.o proto.o
+diff --git a/drivers/tty/mcu_comm/idexxmcu.c b/drivers/tty/mcu_comm/idexxmcu.c
+deleted file mode 100644
+index 889b66a..0000000
+--- a/drivers/tty/mcu_comm/idexxmcu.c
++++ /dev/null
+@@ -1,226 +0,0 @@
+-/*
+- * idexxmcu.c   This module implements the IDEXXMCU protocol for kernel-based
+- *      devices like TTY.  It interfaces between a raw TTY, and the
+- *      serial port (UART) driver.
+- *
+- * Version: @(#)idexxmcu.c  0.1.0   19/03/12
+- *
+- * Authors: Dr. Kouakou Diby, <kouakou-diby@idexx.com>
+- *
+- */
+-
+-#include <asm/uaccess.h>
+-#include <linux/bitops.h>
+-#include <linux/sched.h>
+-#include <linux/string.h>
+-#include <linux/mm.h>
+-#include <linux/interrupt.h>
+-#include <linux/in.h>
+-#include <linux/tty.h>
+-#include <linux/errno.h>
+-#include <linux/skbuff.h>
+-#include <linux/compat.h>
+-#include <linux/delay.h>
+-#include <linux/init.h>
+-#include <linux/slab.h>
+-#include <linux/thread_info.h>
+-#include <linux/kernel.h>
+-#include <linux/module.h>
+-#include <linux/moduleparam.h>
+-#include <linux/timer.h>
+-#include <linux/workqueue.h>
+-
+-#include <linux/idexxmcu_ioctl.h>
+-#include "workArray.h"
+-#include "proto.h"
+-
+-// move this stuff to a header file. AK -- No, please don't. Having it here allows for file (both .c and .h) version cross-check done in idexxmcu_init().
+-#define IDXXMCU_PROTOCOL_VERSION    "0.2.1-m"
+-#define IDXXMCU_PROTOCOL_NAME       "n_idxmcu"
+-
+-extern const char idexxmcu_proto_c_version[];
+-
+-static int idexxmcu_ioctl(struct tty_struct* tty, struct file* file, unsigned int cmd, unsigned long arg);
+-
+-/* Define the line discipline structure for the mcu communication protocol. */
+-static struct tty_ldisc_ops idexxmcu_ldisc ={
+-	.magic = TTY_LDISC_MAGIC,
+-	.name = IDXXMCU_PROTOCOL_NAME,
+-	.open = SOM_MCU_open,
+-	.close = SOM_MCU_close,
+-	.flush_buffer = NULL,
+-	.chars_in_buffer = NULL,
+-	.read = NULL,
+-	.write = NULL,
+-	.ioctl = idexxmcu_ioctl,
+-	.compat_ioctl = NULL,
+-	.set_termios = NULL,
+-	.poll = NULL,
+-	.hangup = SOM_MCU_hangup,
+-	.receive_buf = SOM_MCU_receive_buf,
+-	.write_wakeup = SOM_MCU_write_wakeup,
+-	.dcd_change = NULL,
+-	.owner = THIS_MODULE,
+-};
+-
+-static int __init idexxmcu_init(void)
+-{
+-    int status;
+-
+-    /* Announce the start of our initialization. */
+-    printk(KERN_INFO "IDEXX MCU Communication Protocol: version %s \n", IDXXMCU_PROTOCOL_VERSION);
+-    printk(KERN_INFO "Copyright 2012 IDEXX Laboratories, Inc.\n");
+-
+-    if (strcmp(IDXXMCU_PROTOCOL_VERSION, idexxmcu_ioctl_h_version) || strcmp(IDXXMCU_PROTOCOL_VERSION, idexxmcu_proto_h_version)
+-	          || strcmp(IDXXMCU_PROTOCOL_VERSION, idexxmcu_proto_c_version) || strcmp(IDXXMCU_PROTOCOL_VERSION, idexxmcu_workarray_h_version))
+-    {
+-		status = 1;
+-		printk(KERN_ERR "IDEXXMCU: failed version cross-check.\n");
+-    }
+-    else
+-    {
+-          status = tty_register_ldisc(N_IDXMCU, &idexxmcu_ldisc);
+-          if (status != 0)
+-	          printk(KERN_ERR "IDEXXMCU: can't register line discipline (err = %d).\n", status);
+-    }
+-
+-    return status;
+-}
+-
+-static void __exit idexxmcu_exit(void)
+-{
+-    int i;
+-
+-    /* Unregister the line discipline. */
+-    i = tty_unregister_ldisc(N_IDXMCU);
+-    if (i != 0)
+-	   printk(KERN_ERR "IDEXXMCU: can't unregister line discipline (err = %d).\n", i);
+-    else
+-	   printk(KERN_INFO "IDEXXMCU: line discipline unregistered.\n");
+-}
+-
+-module_init(idexxmcu_init);
+-module_exit(idexxmcu_exit);
+-
+-MODULE_LICENSE("GPL");
+-MODULE_ALIAS_LDISC(N_IDXMCU);
+-MODULE_DESCRIPTION("IDEXX MCU Communication Protocol.");
+-MODULE_AUTHOR("Dr. Kouakou E. Diby, David West, Alexander Krigsfeld");
+-
+-/* Perform I/O control on an active IDEXXMCU channel. */
+-static int idexxmcu_ioctl(struct tty_struct* tty, struct file* file, unsigned int cmd, unsigned long arg)
+-{
+-	idexxmcu_message_t *myMsg = (idexxmcu_message_t *) arg;
+-	SOM_ioctl_cmd real_cmd = (SOM_ioctl_cmd)_IOC_NR(cmd);
+-	int retVal;
+-	int outSize = 0;
+-	u8 inSize;     // must be 1 byte long
+-
+-	if (_IOC_TYPE(cmd) != IDEXXMCU_PROTO_MAGIC || real_cmd >= NUMBER_OF_SOM_IOCTLS)
+-	{
+-		printk(KERN_NOTICE "IDEXXMCU: out of range ioctl command.\n");
+-		return -EINVAL;          // 22
+-	}
+-
+-	if (ioctlDefinition[real_cmd].msgType == 0xFF)
+-	{
+-		printk(KERN_NOTICE "IDEXXMCU: unimplemented ioctl command.\n");
+-		return -ENOSYS;          // 38
+-	}
+-
+-     // verify access to the input structure
+-     // for variable length data, the first byte is the size of the rest
+-     inSize = ioctlDefinition[real_cmd].cmdLen == 0xFE ? sizeof(inSize) : ioctlDefinition[real_cmd].cmdLen;
+-	if (inSize)
+-	{
+-	     if (!access_ok(VERIFY_READ, arg, inSize))
+-	     {
+-		     printk(KERN_NOTICE "IDEXXMCU: ioctl invalid input pointer.\n");
+-		     return -EFAULT;          // 14
+-	     }
+-
+-          if (ioctlDefinition[real_cmd].cmdLen == 0xFE)
+-	     {
+-		     copy_from_user(&inSize, arg++, sizeof(inSize));
+-	          if (inSize && !access_ok(VERIFY_READ, arg, inSize))
+-	          {
+-		          printk(KERN_NOTICE "IDEXXMCU: ioctl invalid input pointer.\n");
+-		          return -EFAULT;          // 14
+-	          }
+-	     }
+-	}
+-
+-     // verify access to the output structure
+-	if (ioctlDefinition[real_cmd].rspLen)
+-	{
+-		outSize = ioctlDefinition[real_cmd].rspLen == 0xFE ? MAX_NOTIFICATION_SIZE : ioctlDefinition[real_cmd].rspLen;
+-
+-		if (!access_ok(VERIFY_WRITE, arg, outSize))
+-		{
+-			printk(KERN_NOTICE "IDEXXMCU: ioctl invalid output pointer.\n");
+-			return -EFAULT;     // 14
+-		}
+-
+-		if (real_cmd == MOTOR_CMD_ACCEPT_PROFILE)
+-		{
+-			MotorCurProfile temp;
+-			copy_from_user(&temp, arg, sizeof(temp));
+-			outSize = temp.bufSize;
+-			if (!access_ok(VERIFY_WRITE, arg, outSize))
+-			{
+-				printk(KERN_NOTICE "IDEXXMCU: ioctl invalid output pointer.\n");
+-				return -EFAULT;     // 14
+-			}
+-		}
+-	}
+-
+-	if (atomic_cmpxchg(&SOM_MCU_workRequest[real_cmd].onlyOneThread, 0, 1))
+-	{
+-		printk(KERN_WARNING "IDEXXMCU: ioctl multi-threading attempted.\n");
+-		return -EBUSY;           // 16
+-	}
+-
+-	if (SOM_MCU_workRequest[real_cmd].inSize = inSize)
+-		SOM_MCU_workRequest[real_cmd].input = (void *)arg;
+-	if (outSize)
+-	{
+-		SOM_MCU_workRequest[real_cmd].output = (void *)arg;
+-		SOM_MCU_workRequest[real_cmd].outSize = outSize;
+-	}
+-
+-	SOM_MCU_SubmitToProto(real_cmd);
+-
+-	switch (SOM_MCU_workRequest[real_cmd].retValue)
+-	{
+-		case RESULT_SUCCESS:
+-			retVal = 0;
+-			break;
+-
+-		case RESULT_NO_ACK:
+-			retVal = -ECONNREFUSED;  // 111
+-			break;
+-
+-		case RESULT_TIMEOUT:
+-			retVal = -ETIMEDOUT;     // 110
+-			break;
+-
+-		case RESULT_ABORTED:
+-			retVal = -EIO;           // 5
+-			break;
+-
+-		case RESULT_NO_MEM:
+-			retVal = -ENOMEM;        // 12
+-			break;
+-
+-		case RESULT_NO_THREAD:
+-			retVal = -EAGAIN;        // 11
+-			break;
+-
+-		default:
+-			retVal = -ENODATA;       // 61
+-			break;
+-	}
+-
+-	atomic_set(&SOM_MCU_workRequest[real_cmd].onlyOneThread, 0);
+-	return retVal;
+-}
+diff --git a/drivers/tty/mcu_comm/proto.c b/drivers/tty/mcu_comm/proto.c
+deleted file mode 100644
+index 1d1863a..0000000
+--- a/drivers/tty/mcu_comm/proto.c
++++ /dev/null
+@@ -1,1860 +0,0 @@
+-#include "workArray.h"
+-#include "proto.h"
+-
+-const char idexxmcu_proto_c_version[] = "0.2.1-m";
+-
+-// the work array -- interface between protocol side (in this file) and ioctl's
+-volatile WorkElement SOM_MCU_workRequest[NUMBER_OF_SOM_IOCTLS];
+-
+-SOM_MCU_ioctl_descriptor ioctlDefinition[NUMBER_OF_SOM_IOCTLS] =    // indexed by SOM_ioctl_cmd
+-{
+-     // notification ioctl
+-     {0xFE,                   0xFF,                              0,                            0xFE,                              0xFE},
+-
+-     // indicator ioctl's
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_PULSE_TRAIN,         sizeof(IndPulseTrainCmd),     0xFF,                              0},
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_LED_SET,             sizeof(IndLEDCmd),            0xFF,                              0},
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_BUZZER_SET,          sizeof(IndBuzzerCmd),         0xFF,                              0},
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_LED_GET,             0,                            PROTO_IND_CMD_LED_STATUS,          sizeof(IndLEDCmd)},
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_BUZZER_GET,          0,                            PROTO_IND_CMD_BUZZER_STATUS,       sizeof(IndBuzzerCmd)},
+-     {MSG_TYPE_INDICATORS,    PROTO_IND_CMD_PULSE_TRAIN_GET,     0,                            PROTO_IND_CMD_PULSE_TRAIN_STATUS,  sizeof(IndPulseTrainCmd)},
+-	{MSG_TYPE_INDICATORS,    PROTO_IND_CMD_PULSE_TRAIN_DEF_GET, 1,                            PROTO_IND_CMD_PULSE_TRAIN_DEF,     sizeof(IndPulseTrainDefCmd)},
+-	{MSG_TYPE_INDICATORS,    PROTO_IND_CMD_PULSE_TRAIN_DEF_SET, sizeof(IndPulseTrainDefCmd),  0xFF,                              0},
+-	{0xFF},        // IND_CMD_PLACEHOLDER3
+-	{0xFF},        // IND_CMD_PLACEHOLDER4
+-	{0xFF},        // IND_CMD_PLACEHOLDER5
+-	{0xFF},        // IND_CMD_PLACEHOLDER6
+-	{0xFF},        // IND_CMD_PLACEHOLDER7
+-	{0xFF},        // IND_CMD_PLACEHOLDER8
+-	{0xFF},        // IND_CMD_PLACEHOLDER9
+-	{0xFF},        // IND_CMD_PLACEHOLDER10
+-
+-     // system ioctl's
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_SOM_IS_UP,           0,                            0xFF,                              0},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_SHUTDOWN,            0,                            0xFF,                              0},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_GET_FW_VER,          0,                            PROTO_SYS_CMD_FW_NUMBERS,          sizeof(SysFirmVerCmd)},
+-	{MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_GET_STATS1,          0,                            PROTO_SYS_CMD_STATS1,              sizeof(SysStats1Cmd)},
+-	{MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_GET_STATS2,          0,                            PROTO_SYS_CMD_STATS2,              sizeof(SysStats2Cmd)},
+-	{MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_GET_STATS3,          0,                            PROTO_SYS_CMD_STATS3,              sizeof(SysStats3Cmd)},
+-	{MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_GET_STATS4,          0,                            PROTO_SYS_CMD_STATS4,              sizeof(SysStats4Cmd)},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_ZAP_STATS,           0,                            0xFF,                              0},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_EPROM_PAGE_GET,      1,                            PROTO_SYS_CMD_EPROM_PAGE,          sizeof(SysEpromCmd)},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_EPROM_PAGE_SET,      sizeof(SysEpromCmd),          0xFF,                              0},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_EPROM_PAGE_ERASE,    1,                            0xFF,                              0},
+-     {MSG_TYPE_SYSTEM,        PROTO_SYS_CMD_STACK_SIZES_GET,     0,                            PROTO_SYS_CMD_STACK_SIZES,         sizeof(SysStacksCmd)},
+-	{0xFF},        // SYS_CMD_PLACEHOLDER2
+-	{0xFF},        // SYS_CMD_PLACEHOLDER3
+-	{0xFF},        // SYS_CMD_PLACEHOLDER4
+-	{0xFF},        // SYS_CMD_PLACEHOLDER5
+-	{0xFF},        // SYS_CMD_PLACEHOLDER6
+-	{0xFF},        // SYS_CMD_PLACEHOLDER7
+-	{0xFF},        // SYS_CMD_PLACEHOLDER8
+-	{0xFF},        // SYS_CMD_PLACEHOLDER9
+-	{0xFF},        // SYS_CMD_PLACEHOLDER10
+-
+-     // motor ioctl's
+-     {MSG_TYPE_MOTOR,         0xFF,                                        0,                   PROTO_MOTOR_CMD_CURRENT_PROFILE,                 sizeof(MotorCurProfCmd)},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ADC_OFFSET_GET,              0,                            PROTO_MOTOR_CMD_ADC_OFFSET_VALUE,       2},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_GOTO,                        sizeof(MotorGotoCmd),         0xFF,                                   0},  // goto
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_GOTO,                        sizeof(MotorGotoCmd),         0xFF,                                   0},  // goto with profile
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_BRAKE,           0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_POWEROFF,        0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_CCW,             0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_CW,              0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_PWM,             sizeof(MotorPWMCmd),          0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_MOTOR_DISABLE,   0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_MOTOR_ENABLE,    0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_ADC_OFF,         0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_SOM_CONTROL_ADC_ON,          0,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_STALL_CURRENT_GET,           0,                            PROTO_MOTOR_CMD_STALL_CURRENT,          2},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_STALL_CURRENT_SET,           2,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ALL_PARMS_GET,               0,                            PROTO_MOTOR_CMD_ALL_PARMS,              sizeof(MotorAllParmsCmd)},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ALL_PARMS_SET,               sizeof(MotorAllParmsCmd),     0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_STALL_SAMPLES_GET,           0,                            PROTO_MOTOR_CMD_STALL_SAMPLES,          2},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_STALL_SAMPLES_SET,           2,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_NO_STALL_CURRENT_GET,        0,                            PROTO_MOTOR_CMD_NO_STALL_CURRENT,       2},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_NO_STALL_CURRENT_SET,        2,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_NO_STALL_SAMPLES_GET,        0,                            PROTO_MOTOR_CMD_NO_STALL_SAMPLES,       2},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_NO_STALL_SAMPLES_SET,        2,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_SNAP_GET,            0,                            PROTO_MOTOR_CMD_TIMEOUT_SNAP,           1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_SNAP_SET,            1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_HOME_GET,            0,                            PROTO_MOTOR_CMD_TIMEOUT_HOME,           1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_HOME_SET,            1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_UP_GET,              0,                            PROTO_MOTOR_CMD_TIMEOUT_UP,             1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_UP_SET,              1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_DOWN_GET,            0,                            PROTO_MOTOR_CMD_TIMEOUT_DOWN,           1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_TIMEOUT_DOWN_SET,            1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_MAX_PWM_GET,                 0,                            PROTO_MOTOR_CMD_MAX_PWM,                2},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_MAX_PWM_SET,                 2,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_FREQ_GET,                    0,                            PROTO_MOTOR_CMD_FREQ,                   4},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_FREQ_SET,                    4,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ACC_PROF_GET,                0,                            PROTO_MOTOR_CMD_ACC_PROF,               1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ACC_PROF_SET,                1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ACC_STEP_GET,                0,                            PROTO_MOTOR_CMD_ACC_STEP,               1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ACC_STEP_SET,                1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_DEC_PROF_GET,                0,                            PROTO_MOTOR_CMD_DEC_PROF,               1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_DEC_PROF_SET,                1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_DEC_STEP_GET,                0,                            PROTO_MOTOR_CMD_DEC_STEP,               1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_DEC_STEP_SET,                1,                            0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_UP_DIR_GET,                  0,                            PROTO_MOTOR_CMD_UP_DIR,                 1},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_UP_DIR_SET,                  1,                            0xFF,                                   0},
+-     {MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_PROFILE_ARRAY_GET,	          1,                            PROTO_MOTOR_CMD_PROFILE_ARRAY,          sizeof(MotorProfileArrayCmd)},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_PROFILE_ARRAY_SET,           sizeof(MotorProfileArrayCmd), 0xFF,                                   0},
+-	{MSG_TYPE_MOTOR,         PROTO_MOTOR_CMD_ALL_SENSORS_GET,             0,                            PROTO_MOTOR_CMD_ALL_SENSORS,            sizeof(MotorAllSensorsCmd)},
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER4
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER5
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER6
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER7
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER8
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER9
+-	{0xFF},        // MOTOR_CMD_PLACEHOLDER10
+-
+-     // battery ioctl's
+-     {MSG_TYPE_BATTERY,       PROTO_BATT_CMD_GET_STATUS,                   0,                  PROTO_BATT_CMD_STATUS,             sizeof(BattStatusCmd)},
+-     {MSG_TYPE_BATTERY,       PROTO_BATT_CMD_GET_GG_VERSION,               0,                  PROTO_BATT_CMD_GG_VERSION,         sizeof(BattGGVersionCmd)},
+-     {0xFF},        // PROTO_BATT_CMD_GET_GG_DFI_CHECKSUM
+-     {0xFF},        // PROTO_BATT_CMD_GG_DFI_FLASH
+-     {MSG_TYPE_BATTERY,       PROTO_BATT_CMD_FS_PKT,                    0xFE,                            0xFF,                              0},
+-     {MSG_TYPE_BATTERY,       PROTO_BATT_CMD_OVERRIDE_CHARGE_RATE,         1,                            0xFF,                              0},
+-	{0xFF},        // BATT_CMD_PLACEHOLDER3,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER4,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER5,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER6,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER7,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER8,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER9,
+-	{0xFF},        // BATT_CMD_PLACEHOLDER10,
+-
+-     {MSG_TYPE_NONE,          0xFF,                                        0,                            0xFF,                    sizeof(ProtStat1Cmd)},   // PROT_CMD_GET_STATISTICS1
+-     {MSG_TYPE_NONE,          0xFF,                                        0,                            0xFF,                    sizeof(ProtStat2Cmd)},   // PROT_CMD_GET_STATISTICS2
+-     {MSG_TYPE_NONE,          0xFF,                                        0,                            0xFF,                    sizeof(ProtStat3Cmd)},   // PROT_CMD_GET_STATISTICS3
+-     {MSG_TYPE_NONE,          0xFF,                                        0,                            0xFF,                              0},            // PROT_CMD_ZAP_STATISTICS
+-     {MSG_TYPE_NONE,          0xFF,                                        0,                            0xFF,                    DRIVER_VERSION_SIZE},    // PROT_CMD_GET_DRIVER_VERSION
+-	{0xFF},        // PROT_CMD_PLACEHOLDER1
+-	{0xFF},        // PROT_CMD_PLACEHOLDER2
+-	{0xFF},        // PROT_CMD_PLACEHOLDER3
+-	{0xFF},        // PROT_CMD_PLACEHOLDER4
+-	{0xFF},        // PROT_CMD_PLACEHOLDER5
+-	{0xFF},        // PROT_CMD_PLACEHOLDER6
+-	{0xFF},        // PROT_CMD_PLACEHOLDER7
+-	{0xFF},        // PROT_CMD_PLACEHOLDER8
+-	{0xFF},        // PROT_CMD_PLACEHOLDER9
+-	{0xFF},        // PROT_CMD_PLACEHOLDER10
+-};
+-
+-// notifications. one array indexed by command per message type. 0 = invalid.
+-static u8 NotIndicators[0x100] =
+-{
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, IND_NOTIFY_INVALID_COMMAND,
+-};
+-static u8 NotSystem[0x100] =
+-{
+-     0, SYS_NOTIFY_BUTTON_UP, SYS_NOTIFY_CORRUPTION, SYS_NOTIFY_POWER_UP, 0, SYS_NOTIFY_POWER_FAIL, SYS_NOTIFY_SHUTDOWN, 0, 0, 0, SYS_NOTIFY_WATCHDOG_RESET, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, SYS_NOTIFY_INVALID_EPROM_PAGE, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, SYS_NOTIFY_INVALID_COMMAND,
+-};
+-static u8 NotMotor[0x100] =
+-{
+-     0, 0, 0, 0, 0, MOTOR_NOTIFY_GOTO_COMPLETE, MOTOR_NOTIFY_SNAP_INSERTED, MOTOR_NOTIFY_SNAP_EJECTED, MOTOR_NOTIFY_HOME_POSITION_REACHED,
+-     MOTOR_NOTIFY_HOME_POSITION_LEFT, MOTOR_NOTIFY_SNAP_POSITION_REACHED, MOTOR_NOTIFY_SNAP_POSITION_LEFT, MOTOR_NOTIFY_SNAP_DOOR_UP,
+-     MOTOR_NOTIFY_SNAP_DOOR_DOWN, MOTOR_NOTIFY_MOTOR_STALL_DETECTED, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, MOTOR_NOTIFY_INVALID_COMMAND,
+-};
+-static u8 NotBattery[0x100] =
+-{
+-     0, BATT_NOTIFY_CHARGER_IN, BATT_NOTIFY_CHARGER_OUT, BATT_NOTIFY_100mA, BATT_NOTIFY_500mA, BATT_NOTIFY_1A, 0, 0,
+-     BATT_NOTIFY_GG_ERROR, 0, 0, 0, 0, 0, 0, 0,
+-     0, BATT_NOTIFY_FS_PKT_STATUS, 0, BATT_NOTIFY_CHARGE_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, BATT_NOTIFY_INVALID_COMMAND,
+-};
+-static u8 *NotMessageGroup[MSG_TYPE_NONE - 1] = {NotIndicators, NotSystem, NotMotor, NotBattery};
+-
+-// variables for parsing received packets
+-static RxTxState rx_progress;                     // state of the parsing state machine
+-static u32 rx_timeoutCnt;                         // number of timeouts on reception that have occurred
+-static u32 rx_brokenCnt;                          // number of broken messages that have been received
+-static u32 rx_successCnt;                         // number of successfully received messages
+-static u32 rx_wrongSTXCnt;                        // number of unexpected STX in packets
+-static u32 rx_orphanedCnt;                        // number of received bytes not belonging to a packet
+-static u32 rx_bugCnt;                             // number of occurrences in the parser that could not have happened
+-static u32 rx_resetCnt;                           // number of received reset commands
+-static u32 rx_resetFailedCnt;                     // number of failed received reset commands
+-static u32 rx_overflowCnt;                        // number of UART overflow errors
+-static u32 rx_framingCnt;                         // number of UART framing errors
+-static u32 rx_parityCnt;                          // number of UART parity errors
+-static u32 rx_wrongSeqCnt;                        // number of wront sequence numbers in received packets
+-static u32 rx_fifoOverrunCnt;                     // number of ACK FIFO overruns
+-static u32 rx_repeatCnt;                          // number of repeated received packets
+-static u32 rx_ackCnt;                             // number of received ACK's
+-static u32 rx_lostProfileCnt;                     // number of unconsumed current profile packets
+-static u32 rx_lostPacketCnt;                      // number of unconsumed non-current profile packets
+-static u16 rx_crc_value;                          // running CRC for the packet
+-static u8 rx_byte_num;                            // running counter of data bytes in the packet being received
+-static struct timer_list rx_packetTimeout;        // timeout for a complete packet to be received
+-static u8 rx_old_seq[RX_PACKET_MEMORY];           // sequence numbers of the last packets
+-static u8 rx_old_size[RX_PACKET_MEMORY];          // data lengths of the last packets
+-static u16 rx_old_crc[RX_PACKET_MEMORY];          // crc of the last packets
+-static u8 rx_memoryInd;                           // write-index into the above 3 arrays
+-static u8 rx_seq;                                 // sequence number for received packets
+-static EscParserState rx_previous_byte;           // reflects the value of the last received byte, usd in ESC-STX decoding
+-static u8 rx_protocol_command;                    // if non-0, contains a protocol-bound (not pertaining to a message type) command being received
+-static u8 rx_received_seq;                        // sequence number of the packet being received
+-static volatile ProtocolHardErrorState rx_hardError;   // tracks received reset commands
+-static struct timer_list rx_resetTimer;           // used to time processing of received reset command
+-static u8 rx_ackForMessage;                       // 1 = receving an ACK for a normal message, 0 = receiving an ACK for reset
+-
+-static u8 rx_msgType;                             // message type of the command we are receiving
+-static u8 rx_size;                                // data size of the packet being received
+-static volatile u8 rx_index;                      // index into SOM_MCU_workRequest and ioctlDefinition of the ioctl on behalf of which we are receiving data
+-static u8 rx_cmd;                                 // command of the packet being received
+-static u8 *rx_dataPtr;                            // pointer to the buffer where packet data is being accumulated
+-static u8 rx_notification[MAX_NOTIFICATION_SIZE]; // temporary buffer to store notifications
+-#pragma pack(push,4)
+-static u8 rx_curProfTempBuf[PROF_NUM_SAMPLE_PAIRS * 4];     // buffer to store current profile data while the ioctl handler is busy handling its regular buffer
+-#pragma pack(pop)
+-static volatile u8 rx_curProfTempBufUsed;         // 1 = rx_curProfTempBuf is used, 0 = not used
+-static volatile u8 rx_curProfOrder;               // 1 = rx_curProfTempBuf was filled before the regular buffer, 0 = after
+-static u32 rx_tempBufCnt;                         // number ofr times rx_curProfTempBuf was used
+-static u32 rx_longNotCnt;                         // number of notifications too long to be accepted
+-static u8 rx_curProfLossNotified;                 // 1 = notification about uncounsumed current profile packet sent, 0 = not yet
+-
+-// variables for transmitting packets
+-static RxTxState tx_progress;                          // transmitter state
+-static u16 tx_crc_value;                               // CRC for the transmitted packet
+-static u32 tx_noackCnt;                                // the number of non-acknowledged transmitted packets
+-static u32 tx_reXmitCnt;                               // the number of packet re-transmissions
+-static u32 tx_timeoutCnt;                              // the number of ioctl timeouts
+-static u8 tx_seq;                                      // sequence number for transmitted packets
+-static volatile u8 tx_unackedWindowStart;              // the earliest unacked sequence number
+-static u8 tx_unackedBuf[TX_UNACKED_WINDOW];            // indices into SOM_MCU_workRequest and ioctlDefinition of recently transmitted packets
+-static volatile u8 tx_unackedBufInd;                   // index into tx_unackedBuf of the entry with the earliest sequence number
+-static EscParserState tx_previous_byte;                // reflects the value of the last transmitted byte; used in ESC-STX encoding
+-static u32 tx_resetCnt;                                // number of initiated reset commands
+-static u32 tx_resetFailedCnt;                          // number of failed initiated reset commands
+-static u32 tx_packetsCnt;                              // number of transmitted packets
+-static u32 tx_acksCnt;                                 // number of transmitted acks
+-static volatile ProtocolHardErrorState tx_hardError;   // tracks transmitted reset commands
+-static struct timer_list tx_resetTimer;                // used to time processing of initiated reset command
+-static u8 tx_resetReXmitCnt;                           // used to count reset re-transmissions if ACK's are not received
+-static struct timer_list tx_resetReXmitTimer;
+-
+-static volatile u8 tx_xmittingInd;                     // index of the work request being transmitted
+-
+-static u32 RxTxHardCnt;                                // number of protocol hard errors.
+-static u8 HardErrorCleanupPending;                     // 0 = no cleanup necessary, 1 = hard error cleanup, 2 = failed hard error cleanup
+-
+-static struct completion notSemaphore;            // used to control the notification thread
+-static struct completion notHandlerSemaphore;     // used to control the notification thread
+-static struct completion txSemaphore;             // used to control the worker thread
+-static struct completion xmitSemaphore;           // used to control the transmission thread
+-static struct completion canWriteSemaphore;       // used to control the transmission thread
+-static struct completion msgSemaphore;            // used to control the transmission thread
+-
+-static volatile u8 notFifo[PROTO_FIFO_SIZE + 3];  // extra 3 bytes are FIFO pointers -- in, out, and overrun signal
+-static u32 notFifoOverrunCnt;
+-
+-static volatile u8 ackFifo[PROTO_FIFO_SIZE + 3];  // extra 3 bytes are FIFO pointers -- in, out, and overrun signal
+-
+-static struct tty_struct *my_tty;                 // pointer to the tty structure we are the line dscipline of
+-
+-static struct task_struct *notTask;     // notification thread identifier
+-static struct task_struct *txTask;      // worker thread identifier
+-static struct task_struct *xmitTask;    // transmission thread identifier
+-
+-static volatile u8 shuttingDown;        // initialized to 0 in open, set to 1 in close; checked by all threads
+-
+-// Stuff one byte in a FIFO. On FIFO overflow the byte is discarded.
+-static void fifo_in_one(u8 byte, volatile u8 *fifo, u32 *overrunCnt)
+-{
+-     register u8 in, newIn;
+-
+-     AtomicOp(
+-          in = fifo[0];
+-          newIn = in == PROTO_FIFO_SIZE - 1 ? 0 : in + 1;
+-          if (newIn != fifo[1])
+-          {
+-               fifo[in + 3] = byte;
+-               fifo[0] = newIn;
+-          }
+-          else
+-          {
+-               ++*overrunCnt;
+-               fifo[2] = 1;   // raise overrun signal
+-          }
+-     )
+-}
+-
+-// Stuff numberOfBytes from bytes in a FIFO. On FIFO overflow the bytes are discarded.
+-static void fifo_in_many(u8 *bytes, u8 numberOfBytes, volatile u8 *fifo, u32 *overrunCnt)
+-{
+-     register u8 in, inTemp;
+-     register int i;
+-     int inInd[MAX_NOTIFICATION_SIZE];
+-     unsigned long flags;
+-
+-     raw_local_irq_save(flags);
+-     do
+-     {
+-          raw_local_irq_restore(flags);
+-          for (i = 0, in = inTemp = fifo[0]; i < numberOfBytes; ++i)
+-          {
+-               inInd[i] = 3 + inTemp;
+-               inTemp = inTemp == PROTO_FIFO_SIZE - 1 ? 0 : inTemp + 1;
+-               if (inTemp == fifo[1])   // FIFO overflow
+-               {
+-                    raw_local_irq_save(flags);
+-                    ++*overrunCnt;
+-                    raw_local_irq_restore(flags);
+-                    fifo[2] = 1;   // raise overrun signal
+-                    return;
+-               }
+-          }
+-          raw_local_irq_save(flags);
+-     } while (in != fifo[0]);      // if FIFO in pointer advanced while we were working, start again
+-
+-     // here interrupts are disabled
+-     while (i--)
+-          fifo[inInd[i]] = bytes[i];
+-     fifo[0] = inTemp;
+-
+-     raw_local_irq_restore(flags);
+-}
+-
+-// returns a byte or -1 if the FIFO is empty
+-static int fifo_out(volatile u8 *fifo)
+-{
+-     register u8 out;
+-     int byte = -1;
+-
+-     AtomicOp(
+-          out = fifo[1];
+-
+-          if (out != fifo[0]) // there is stuff in the FIFO
+-          {
+-               byte = fifo[3 + out++];
+-               fifo[1] = out == PROTO_FIFO_SIZE ? 0 : out;
+-          }
+-     )
+-
+-     return byte;
+-}
+-
+-static void not_fifo_in_one(u8 byte)
+-{
+-     fifo_in_one(byte, notFifo, &notFifoOverrunCnt);
+-     complete(&notSemaphore);      // wake up notification thread
+-}
+-
+-static void not_fifo_in_many(u8 *bytes, u8 numberOfBytes)
+-{
+-     fifo_in_many(bytes, numberOfBytes, notFifo, &notFifoOverrunCnt);
+-     complete(&notSemaphore);      // wake up notification thread
+-}
+-
+-static int not_fifo_out(void)
+-{
+-     return fifo_out(notFifo);
+-}
+-
+-static void ack_fifo_in_one(u8 byte)
+-{
+-     fifo_in_one(byte, ackFifo, &rx_fifoOverrunCnt);
+-     complete(&xmitSemaphore);     // wake up the transmission thread
+-}
+-
+-static int ack_fifo_out(void)
+-{
+-     return fifo_out(ackFifo);
+-}
+-
+-static void DummyAlarm(unsigned long parm)
+-{
+-}
+-
+-static void MyAlarm(unsigned long parm)
+-{
+-     complete(&txSemaphore);
+-}
+-
+-static void set_wakeup_delay(int alarmFunc, struct timer_list * time_to_reach, u8 min, u8 sec, u16 ms)
+-{
+-     del_timer(time_to_reach);
+-     init_timer(time_to_reach);
+-     time_to_reach->expires = jiffies + ((unsigned long)min * 60000 + sec * 1000 + ms) * HZ / 1000 + 1;
+-     time_to_reach->function = alarmFunc ? MyAlarm : DummyAlarm;
+-     add_timer(time_to_reach);
+-}
+-
+-static void AbortRxPacket(u32 *errorCtr)   // pointer to an error counter
+-{
+-     rx_progress = RXTX_IDLE;                          // abort the packet
+-     AtomicOp(++*errorCtr)                             // count errors of this type
+-}
+-
+-// advance a sequence number
+-static inline u8 AddToSequence(u8 seq, u8 increment)
+-{
+-     u8 temp1 = seq;
+-     u8 temp2 = temp1 + increment;
+-
+-     if (temp1 < ESC_CHAR && temp2 >= ESC_CHAR)
+-          ++temp2;
+-	if (temp1 < STX_CHAR && temp2 >= STX_CHAR)
+-          ++temp2;
+-     if (temp2 >= 0x80)
+-	     temp2 -= 0x7E;
+-     return temp2;
+-}
+-
+-// returns signed difference of two sequence numbers; negative if the first is the earlier, positive if it is the later
+-static s8 SeqDiff(u8 seq1, u8 seq2)
+-{
+-	union {s8 withSign; u8 noSign;} temp;
+-
+-     temp.noSign = seq1 - seq2;
+-
+-	// account for skipped ESC_CHAR and STX_CHAR and for the rolling range of values of 0x02 - 0x7F
+-	if (temp.withSign > 64)            // seq1 is earlier than seq2. 64 is somewhat an arbitrary value, about the half of the range
+-	{
+-	     temp.withSign -= 126;
+-          if (seq1 < ESC_CHAR)
+-               ++temp.withSign;
+-          if (seq1 < STX_CHAR)
+-               ++temp.withSign;
+-          if (seq2 > ESC_CHAR)
+-               ++temp.withSign;
+-          if (seq2 > STX_CHAR)
+-               ++temp.withSign;
+-	}
+-     else if (temp.withSign > 0)        // seq1 is later than seq2
+-	{
+-          if (seq2 < ESC_CHAR && seq1 > ESC_CHAR)
+-               --temp.withSign;
+-	     if (seq2 < STX_CHAR && seq1 > STX_CHAR)
+-               --temp.withSign;
+-	}
+-     else if (temp.withSign < -64)      // seq1 is later than seq2
+-	{
+-	     temp.withSign += 126;
+-          if (seq1 > ESC_CHAR)
+-               --temp.withSign;
+-          if (seq1 > STX_CHAR)
+-               --temp.withSign;
+-          if (seq2 < ESC_CHAR)
+-               --temp.withSign;
+-          if (seq2 < STX_CHAR)
+-               --temp.withSign;
+-	}
+-     else if (temp.withSign < 0)        // seq1 is earlier than seq2
+-	{
+-          if (seq1 < ESC_CHAR && seq2 > ESC_CHAR)
+-               ++temp.withSign;
+-	     if (seq1 < STX_CHAR && seq2 > STX_CHAR)
+-               ++temp.withSign;
+-	}
+-
+-     return temp.withSign;
+-}
+-
+-// returns 1 if the UART link has been repaired (or was never broken), 0 otherwise
+-static inline uint8_t LinkStateRepaired(void)
+-{
+-      u8 ret;
+-      AtomicOp(ret = tx_hardError == HARD_ERROR_NONE && rx_hardError == HARD_ERROR_NONE)
+-	 return ret;
+-}
+-
+-// returns 1 if the UART link is in normal state, 0 otherwise
+-static u8 LinkStateNormal(void)
+-{
+-      u8 ret;
+-      AtomicOp(ret = tx_hardError == HARD_ERROR_NONE && rx_hardError == HARD_ERROR_NONE && !HardErrorCleanupPending)
+-	 return ret;
+-}
+-
+-// returns 1 if we failed to repair a broken link, 0 otherwise
+-static u8 LinkRepairFailed(void)
+-{
+-     return tx_hardError == HARD_ERROR_FAILED || rx_hardError == HARD_ERROR_FAILED;
+-}
+-
+-// returns 1 if a link line (RX or TX) is in exception state, i.e. hard error is being processed on it, 0 otherwise
+-static u8 LinkLineInException(ProtocolHardErrorState *stateVar)
+-{
+-     return *stateVar == HARD_ERROR_PROCESSING || *stateVar == HARD_ERROR_TRANSMITTED;
+-}
+-
+-static void DoIndicateReset(u32 *statCnt, ProtocolHardErrorState *stateVar, struct timer_list *resetTimer)
+-{
+-     AtomicOp(
+-          // maintain statistics
+-          ++RxTxHardCnt;
+-          ++*statCnt;
+-
+-          // if we are already processing reset, no need to interrupt it
+-          if (!LinkLineInException(stateVar))
+-	     {
+-               *stateVar = HARD_ERROR_PROCESSING;
+-			if (!HardErrorCleanupPending)
+-			     HardErrorCleanupPending = 1;
+-               raw_local_irq_restore(flags);
+-               complete(&txSemaphore);
+-               complete(&xmitSemaphore);
+-               set_wakeup_delay(1, resetTimer, 0, 0, RESET_TIMEOUT);
+-			if (stateVar == &tx_hardError)     // for the reset command we initiate, set re-transmission variables
+-			{
+-				tx_resetReXmitCnt = 1;
+-				set_wakeup_delay(1, &tx_resetReXmitTimer, 0, 0, ACK_RESEND_DELAY);
+-                    not_fifo_in_one(PROTOCOL_NOTIFY_RESET_INITIATED);
+-			}
+-               else
+-                    not_fifo_in_one(PROTOCOL_NOTIFY_RESET_RECEIVED);
+-	     }
+-	)
+-}
+-
+-// indicate initiation of reset processing and maintain relevant statistics counters
+-static void IndicateReset(ProtocolHardErrorState *stateVar)
+-{
+-     if (stateVar == &rx_hardError)
+-          DoIndicateReset(&rx_resetCnt, &rx_hardError, &rx_resetTimer);
+-     else
+-          DoIndicateReset(&tx_resetCnt, &tx_hardError, &tx_resetTimer);
+-}
+-
+-static u8 GetUnackedIndex(u8 increment)
+-{
+-	u8 i = tx_unackedBufInd + increment;
+-
+-     if (i >= TX_UNACKED_WINDOW)
+-	     i -= TX_UNACKED_WINDOW;
+-
+-     return i;
+-}
+-
+-// returns 1 if it released the ioctl, 0 if the ioctl is already released by another thread
+-static int ReleaseIoctl(ResultCode result, int index)
+-{
+-     RequestState *ptr = &SOM_MCU_workRequest[index].state;
+-     int ret = 0;
+-
+-     AtomicOp(
+-          // prevent releasing newly requested ioctl with the call for an old already released one
+-          if (*ptr != RS_IDLE &&
+-               (result == RESULT_ABORTED ||                           // abort is unconditional
+-               result == RESULT_SUCCESS && *ptr == RS_ACKED ||        // for success the ioctl must be acknowledged
+-               result != RESULT_SUCCESS && *ptr >= RS_SUBMITTED))     // for errors the ioctl must be active
+-          {
+-               *ptr = RS_IDLE;
+-               ret = 1;
+-          }
+-     )
+-
+-     if (ret)
+-     {
+-          SOM_MCU_workRequest[index].retValue = result;
+-          AtomicOp(
+-               if (rx_index == index)                                 // abort possible late reception of packet on this ioctl
+-                    rx_index = 0xFF;
+-          )
+-          complete(&SOM_MCU_workRequest[index].workIndicator);
+-     }
+-
+-     return ret;
+-}
+-
+-// returns -1 if the sequence number to be marked as acked is invalid (also causes link reset), or index into the work request array of the entry with this sequence number,
+-// or 0xFF if the entry has already been marked
+-static int MarkAsAcked(u8 sequence)
+-{
+-     int i, j, k, l;
+-
+-     i = SeqDiff(sequence, tx_unackedWindowStart);
+-	j = SeqDiff(tx_seq, sequence);
+-
+-	if (i < 0 || i >= TX_UNACKED_WINDOW || j <= 0)    // unexpected ACK is a hard error
+-     {
+-          AtomicOp(++rx_wrongSeqCnt)
+-          IndicateReset(&tx_hardError);
+-          return -1;
+-     }
+-     else
+-	{
+-		// maintain unacked window
+-		l = GetUnackedIndex(i);
+-          AtomicOp(
+-		     if ((k = tx_unackedBuf[l]) != 0xFF)     // 0xFF means this has been already acked
+-			     tx_unackedBuf[l] = 0xFF;
+-          )
+-	}
+-
+-     return k;
+-}
+-
+-static void rxStateMachine(u8 byte)
+-{
+-     int i;
+-
+-     // do ESC sequence decoding
+-     switch(rx_previous_byte)
+-     {
+-          case ESC_PARSER_LOOK_FOR_ESC:
+-               if (byte == ESC_CHAR)
+-               {
+-                    rx_previous_byte = ESC_PARSER_ESC_FOUND;
+-                    return;
+-               }
+-               if (byte == STX_CHAR)
+-               {
+-                    if (rx_progress != RXTX_IDLE)
+-                         AbortRxPacket(&rx_wrongSTXCnt);
+-                    rx_progress = RXTX_MESSAGE_TYPE;
+-                    rx_crc_value = 0;
+-                    rx_protocol_command = 0;
+-                    set_delay(&rx_packetTimeout, 0, 0, PACKET_TIMEOUT);    // reset Packet Timeout because we just received a start character
+-                    return;
+-               }
+-               break;
+-
+-          case ESC_PARSER_ESC_FOUND:
+-               if (byte != ESC_CHAR && byte != STX_CHAR)
+-               {
+-                    rx_previous_byte = ESC_PARSER_SOLO_ESC;
+-                    rxStateMachine(ESC_CHAR);
+-               }
+-               rx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-               // absence of break is intentional
+-
+-          case ESC_PARSER_SOLO_ESC:
+-               break;
+-
+-          default:
+-               AbortRxPacket(&rx_bugCnt);
+-               rx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-     }
+-
+-     // A timer is started when the first character of a packet is received
+-     // If the packet timer times out before the packet is complete
+-     // throw out the partial packet.
+-     if (rx_progress != RXTX_IDLE)
+-     {
+-          if (check_delay(&rx_packetTimeout))     // timeout
+-               AbortRxPacket(&rx_timeoutCnt);
+-          else if (rx_progress < RXTX_CHKSUM1)
+-               rx_crc_value = crc16_byte(rx_crc_value, byte);
+-     }
+-
+-     // Proceed through the received packet state machine
+-     switch(rx_progress++)
+-     {
+-          // The start byte has not been sent yet
+-          case RXTX_IDLE:
+-               rx_progress = RXTX_IDLE;
+-               AtomicOp(++rx_orphanedCnt)
+-               break;
+-
+-          // Waiting for the message type
+-          case RXTX_MESSAGE_TYPE:
+-               switch (byte)
+-			{
+-                    case RESET_CHAR:    // resets are allowed through unconditionally
+-                         rx_protocol_command = byte;
+-				     break;
+-
+-                    case ACK_CHAR:      // ACK's are allowed in normal processing and during reset if they are expected
+-                         if ((rx_ackForMessage = LinkStateNormal()) || LinkLineInException(&tx_hardError))
+-                              rx_protocol_command = byte;
+-				     else
+-                              rx_progress = RXTX_IDLE;
+-					break;
+-
+-			     default:            // not a protocol-bound message; if a previous reset failed, it just causes another reset
+-                         if (LinkRepairFailed())
+-                              IndicateReset(&tx_hardError);
+-					if (!LinkStateNormal())       // if we are processing reset, incoming bytes are ignored
+-                              rx_progress = RXTX_IDLE;
+-                         else
+-                         {
+-                              if (byte >= MSG_TYPE_NONE || !byte)
+-                              {
+-                                   AtomicOp(++rx_brokenCnt)
+-                                   rx_progress = RXTX_IDLE;
+-                              }
+-                              else
+-                                   rx_msgType = byte;
+-			          }
+-               }
+-               break;
+-
+-          // Waiting for the sequence number byte
+-          case RXTX_SEQ:
+-               if (byte == ESC_CHAR || byte == STX_CHAR || !byte || byte &0x80)
+-                    AbortRxPacket(&rx_brokenCnt);
+-			else
+-			{
+-                    rx_received_seq = byte;
+-                    if (rx_protocol_command)
+-                         rx_progress = RXTX_CHKSUM1;
+-			}
+-               break;
+-
+-          // Waiting for the size of the data message
+-          case RXTX_DATA_SIZE:
+-               // make sure we don't overrun our buffer and flag the error if we do
+-               if (!byte || byte > MAX_DATA_LENGTH)
+-                    AbortRxPacket(&rx_brokenCnt);
+-               else
+-               {
+-                    rx_size = byte - 1;
+-                    rx_byte_num = 0;
+-               }
+-               break;
+-
+-          // Waiting for the command byte
+-          case RXTX_CMD:
+-               // find a consumer/waiter for the packet
+-               for (i = FIRST_PROTOCOL_IOCTL - 1; i > 0; --i)   // search from the end so that the notifications ioctl is hit last
+-                    if (ioctlDefinition[i].msgType == rx_msgType && ioctlDefinition[i].rsp == byte && byte != 0xFF)
+-                         break;
+-               rx_index = i;
+-               rx_cmd = byte;
+-               if (i)    // it is not a notification
+-               {
+-                    if (SOM_MCU_workRequest[i].state < RS_ACKED) // the handler is not waiting for us
+-                    {
+-                         // current profile requires special handling because the ioctl handler may be temporarily busy and thus not waiting for the new packet
+-                         if (rx_msgType == MSG_TYPE_MOTOR && byte == PROTO_MOTOR_CMD_CURRENT_PROFILE)
+-                         {
+-                              if (rx_curProfTempBufUsed)    // temporary profile buffer is already used
+-                                   rx_dataPtr = NULL;
+-                              else
+-                                   rx_dataPtr = rx_curProfTempBuf;
+-                         }
+-                         else
+-                              rx_dataPtr = NULL;
+-                    }
+-                    else
+-                         rx_dataPtr = SOM_MCU_workRequest[i].outBuffer;
+-               }
+-               else      // it is a notification
+-                    rx_dataPtr = rx_size >= MAX_NOTIFICATION_SIZE ? NULL : rx_notification + 1;
+-               if (!rx_size)
+-                    rx_progress = RXTX_CHKSUM1;
+-               break;
+-
+-          // Receiving the data part of the message
+-          case RXTX_DATA:
+-               // Fill the buffer
+-               if (rx_dataPtr != NULL)
+-               {
+-                    AtomicOp(
+-                         if (rx_index != 0xFF)
+-                              rx_dataPtr[rx_byte_num] = byte;
+-                         else
+-                              rx_dataPtr = NULL;
+-                    )
+-               }
+-               if (++rx_byte_num < rx_size)
+-                    rx_progress = RXTX_DATA;
+-               break;
+-
+-          // Waiting for the checksum
+-          case RXTX_CHKSUM1:
+-               // verify low CRC byte
+-               if ((rx_crc_value & 0xFF) != byte )
+-                    AbortRxPacket(&rx_brokenCnt);
+-               break;
+-
+-          // Waiting for the checksum
+-          case RXTX_CHKSUM2:
+-               // verify high CRC byte
+-               if (rx_crc_value >> 8 != byte )
+-                    AbortRxPacket(&rx_brokenCnt);
+-               else
+-               {
+-                    rx_progress = RXTX_IDLE;
+-                    switch(rx_protocol_command)
+-				{
+-                         case RESET_CHAR:    // received a reset command
+-                              if (rx_received_seq != 0x01)
+-                              {
+-                                   AtomicOp(++rx_wrongSeqCnt)
+-                                   IndicateReset(&tx_hardError);
+-                              }
+-                              else
+-                                   IndicateReset(&rx_hardError);
+-                              break;
+-
+-                         case ACK_CHAR:      // received an ACK
+-                              if (rx_ackForMessage)                        // the ACK is for a normal message; make sure that its sequence number is within the window
+-					     {                                            // of the not-yet-acked messages
+-                                   i = MarkAsAcked(rx_received_seq);
+-                                   if (i >= 0)    // valid sequence number
+-                                   {
+-                                        AtomicOp(++rx_ackCnt)    // maintain statistics
+-                                        if (i != 0xFF)           // has not been acked yet
+-                                        {
+-                                             AtomicOp(
+-                                                  if (SOM_MCU_workRequest[i].state == RS_TRANSMITTED)
+-                                                       SOM_MCU_workRequest[i].state = RS_ACKED;
+-                                             )
+-                                             if (ioctlDefinition[i].rsp == 0xFF)               // release the ioctl if no response is expected
+-                                                  ReleaseIoctl(RESULT_SUCCESS,i);
+-                                        }
+-							}
+-					     }
+-                              else                                         // the ACK is for a reset command we transmitted
+-                              {
+-                                   if (rx_received_seq != 0x01)
+-                                   {
+-                                        AtomicOp(++rx_wrongSeqCnt)
+-                                   }
+-                                   else
+-                                   {
+-                                        tx_hardError = HARD_ERROR_NONE;    // reset has been acked so it is done
+-                                        not_fifo_in_one(PROTOCOL_NOTIFY_RESET_INITIATED_COMPLETE);
+-                                   }
+-                              }
+-						break;
+-
+-	                    default:            // received a normal message
+-					     for (i = 0; i < RX_PACKET_MEMORY; ++i)       // repetitious packets are not given to tasks
+-					          if (rx_received_seq == rx_old_seq[i] && rx_size == rx_old_size[i] && rx_crc_value == rx_old_crc[i])
+-						          break;
+-                              if (i < RX_PACKET_MEMORY)                    // it is a repeat, so just ACK it again
+-                              {
+-				               ack_fifo_in_one(rx_received_seq);
+-                                   AtomicOp(++rx_repeatCnt)
+-                              }
+-                              else if (rx_received_seq != rx_seq)          // break in the ACK sequence is a hard error
+-                              {
+-                                   AtomicOp(++rx_wrongSeqCnt)
+-                                   IndicateReset(&tx_hardError);
+-                              }
+-                              else                                         // received a normal data packet
+-                              {
+-                                   rx_old_seq[rx_memoryInd] = rx_received_seq;       // maintain packet memory
+-                                   rx_old_size[rx_memoryInd] = rx_size;
+-                                   rx_old_crc[rx_memoryInd] = rx_crc_value;
+-					          rx_memoryInd = rx_memoryInd == RX_PACKET_MEMORY - 1 ? 0 : rx_memoryInd + 1;
+-                                   rx_seq = AddToSequence(rx_seq, 1);      // increment received sequence
+-                                   ack_fifo_in_one(rx_received_seq);
+-                                   AtomicOp(++rx_successCnt)               // maintain statistics
+-                                   i = rx_index;                           // for atomicity through multiple operations
+-                                   if (i != 0xFF)                          // the ioctl is still active
+-                                   {
+-                                        if (i)         // not a notification
+-                                        {
+-                                             if (rx_dataPtr == NULL)  // could not store data
+-                                             {
+-                                                  if (rx_msgType == MSG_TYPE_MOTOR && rx_cmd == PROTO_MOTOR_CMD_CURRENT_PROFILE)
+-                                                  {
+-                                                       if (!rx_curProfLossNotified)
+-                                                       {
+-                                                            not_fifo_in_one(PROTOCOL_NOTIFY_LOST_PROFILE);
+-                                                            rx_curProfLossNotified = 1;
+-                                                       }
+-                                                       AtomicOp(++rx_lostProfileCnt)
+-                                                  }
+-                                                  else
+-                                                  {
+-                                                       not_fifo_in_one(PROTOCOL_NOTIFY_LOST_PACKET);
+-                                                       AtomicOp(++rx_lostPacketCnt)
+-                                                  }
+-                                             }
+-                                             else                     // could store data
+-                                             {
+-                                                  if (rx_msgType == MSG_TYPE_MOTOR && rx_cmd == PROTO_MOTOR_CMD_CURRENT_PROFILE)
+-                                                  {
+-                                                       rx_curProfLossNotified = 0;
+-                                                       if (rx_dataPtr == rx_curProfTempBuf)
+-                                                       {
+-                                                            AtomicOp(++rx_tempBufCnt)
+-                                                            AtomicOp(
+-                                                                 rx_curProfTempBufUsed = 1;
+-                                                                 rx_curProfOrder = SOM_MCU_workRequest[i].state == RS_ACKED;
+-											     )
+-                                                            if (rx_curProfOrder)
+-                                                                 ReleaseIoctl(RESULT_SUCCESS, i);
+-                                                       }
+-											else
+-                                                            ReleaseIoctl(RESULT_SUCCESS, i);
+-                                                  }
+-										else
+-                                                       ReleaseIoctl(RESULT_SUCCESS, i);
+-                                             }
+-                                        }
+-                                        else           // notification
+-                                        {
+-                                             if (rx_dataPtr == NULL)
+-                                             {
+-                                                  AbortRxPacket(&rx_longNotCnt);
+-                                                  not_fifo_in_one(PROTOCOL_NOTIFY_TOO_LONG);
+-                                             }
+-                                             else
+-                                             {
+-                                                  // find the notification for this command
+-                                                  rx_dataPtr = NotMessageGroup[rx_msgType - 1];
+-                                                  byte = rx_dataPtr[rx_cmd];
+-                                                  if (!byte)
+-                                                       not_fifo_in_one(NOTIFY_UNKNOWN);
+-                                                  else switch (byte)
+-                                                  {
+-                                                       case MOTOR_NOTIFY_GOTO_COMPLETE:
+-                                                       case BATT_NOTIFY_GG_ERROR:
+-											case BATT_NOTIFY_FS_PKT_STATUS:
+-                                                            rx_notification[0] = byte;
+-                                                            not_fifo_in_many(rx_notification, 4);
+-                                                            break;
+-
+-                                                       case IND_NOTIFY_INVALID_COMMAND:
+-                                                       case SYS_NOTIFY_INVALID_COMMAND:
+-                                                       case MOTOR_NOTIFY_INVALID_COMMAND:
+-                                                       case BATT_NOTIFY_INVALID_COMMAND:
+-                                                            rx_notification[0] = byte;
+-                                                            not_fifo_in_many(rx_notification, 2);
+-                                                            break;
+-
+-                                                       default:
+-                                                            not_fifo_in_one(byte);
+-                                                  }
+-                                             }
+-                                        }
+-                                   }
+-                              }
+-                    }
+-               }
+-               break;
+-
+-            default:
+-               AbortRxPacket(&rx_bugCnt);
+-               break;
+-     }
+-}
+-
+-// line discipline receive bytes from the MCU
+-void	SOM_MCU_receive_buf(struct tty_struct * tty, const unsigned char *cp, char *fp, int count)
+-{
+-     for (; count--; ++cp, fp != NULL ? ++fp : 0)
+-     {
+-          if (fp != NULL)
+-          {
+-               if (*fp == TTY_NORMAL)
+-                    rxStateMachine(*cp);
+-               else if (*fp == TTY_FRAME)
+-                    AbortRxPacket(&rx_framingCnt);
+-               else if (*fp == TTY_PARITY)
+-                    AbortRxPacket(&rx_parityCnt);
+-               else if (*fp == TTY_OVERRUN)
+-                    AbortRxPacket(&rx_overflowCnt);
+-          }
+-          else
+-               rxStateMachine(*cp);
+-     }
+-}
+-
+-// returns 1 if shutdown is requested, 0 otherwise
+-static int WaitForCompletionWithStopCheck(struct completion *cPtr)
+-{
+-     wait_for_completion(cPtr);
+-     return shuttingDown;
+-}
+-
+-// the notification thread
+-static int NotificationThread(void *ptr)
+-{
+-     while (!kthread_should_stop())
+-     {
+-          if (WaitForCompletionWithStopCheck(&notSemaphore))
+-               return 0;
+-          if (WaitForCompletionWithStopCheck(&notHandlerSemaphore))
+-               return 0;
+-          if (notFifo[2])
+-          {
+-               notFifo[2] = 0;
+-               SOM_MCU_workRequest[0].outBuffer[0] = PROTOCOL_NOTIFY_LOST_NOTIFICATIONS;
+-               ReleaseIoctl(RESULT_SUCCESS,0);
+-          }
+-          else if (ackFifo[2])
+-          {
+-               ackFifo[2] = 0;
+-               SOM_MCU_workRequest[0].outBuffer[0] = PROTOCOL_NOTIFY_LOST_ACKS;
+-               ReleaseIoctl(RESULT_SUCCESS,0);
+-          }
+-          else
+-          {
+-               int byte = not_fifo_out();
+-
+-               if (byte != -1)     // FIFO was not empty
+-               {
+-                    SOM_MCU_workRequest[0].outBuffer[0] = byte;
+-                    switch (byte)  // parse for notifications with data
+-                    {
+-                         case MOTOR_NOTIFY_GOTO_COMPLETE:
+-                         case BATT_NOTIFY_GG_ERROR:
+-					case BATT_NOTIFY_FS_PKT_STATUS:
+-                              SOM_MCU_workRequest[0].outBuffer[1] = not_fifo_out();
+-                              SOM_MCU_workRequest[0].outBuffer[2] = not_fifo_out();
+-                              SOM_MCU_workRequest[0].outBuffer[3] = not_fifo_out();
+-                              break;
+-
+-                         case IND_NOTIFY_INVALID_COMMAND:
+-                         case SYS_NOTIFY_INVALID_COMMAND:
+-                         case MOTOR_NOTIFY_INVALID_COMMAND:
+-                         case BATT_NOTIFY_INVALID_COMMAND:
+-                              SOM_MCU_workRequest[0].outBuffer[1] = not_fifo_out();
+-                              break;
+-                    }
+-                    ReleaseIoctl(RESULT_SUCCESS,0);
+-               }
+-          }
+-     }
+-
+-     return 0;
+-}
+-
+-// line discipline write wake-up
+-void	SOM_MCU_write_wakeup(struct tty_struct *tty)
+-{
+-     complete(&txSemaphore);
+-     complete(&canWriteSemaphore);
+-}
+-
+-// returns 1 if shutdown is requested, 0 otherwise
+-static int InitiateCommand(u8 ind)
+-{
+-     if (WaitForCompletionWithStopCheck(&msgSemaphore))     // wait for the previous command to be transmitted
+-          return 1;
+-     tx_xmittingInd = ind;
+-     INIT_COMPLETION(msgSemaphore);
+-     complete(&xmitSemaphore);
+-     return 0;
+-}
+-
+-static void MonitorResetTimeout(ProtocolHardErrorState *stateVar, struct timer_list *timer, u32 *ctr)
+-{
+-     if (LinkLineInException(stateVar) && check_delay(timer))
+-     {
+-          *stateVar = HARD_ERROR_FAILED;
+-	     HardErrorCleanupPending = 2;
+-          AtomicOp(++*ctr)
+-          not_fifo_in_one(stateVar == &rx_hardError ? PROTOCOL_NOTIFY_RESET_RECEIVED_FAILED : PROTOCOL_NOTIFY_RESET_INITIATED_FAILED);
+-     }
+-}
+-
+-// returns 1 if shutdown is requested, 0 otherwise
+-static int MonitorReTransmission(u8 *reXmitCnt, struct timer_list *reXmitTimer, u8 messageOrProtocol, u8 ind)
+-{
+-     if (check_delay(reXmitTimer))           // timeout for the ack has expired
+-     {
+-          if (*reXmitCnt == MAX_TX_TRIES)    // maximum number of tries has been reached
+-          {
+-			if (messageOrProtocol)
+-               {
+-                    IndicateReset(&tx_hardError);
+-                    if (ReleaseIoctl(RESULT_NO_ACK, ind))
+-                    {
+-                         AtomicOp(++tx_noackCnt)  // accumulate statistics
+-                    }
+-               }
+-               else
+-               {
+-                    AtomicOp(++tx_noackCnt)       // accumulate statistics
+-                    tx_hardError = HARD_ERROR_FAILED;
+-			     HardErrorCleanupPending = 2;
+-			     AtomicOp(++tx_resetFailedCnt)
+-                    not_fifo_in_one(PROTOCOL_NOTIFY_RESET_INITIATED_FAILED);
+-               }
+-          }
+-          else
+-          {
+-               ++*reXmitCnt;                 // another try
+-               AtomicOp(++tx_reXmitCnt)      // accumulate statistics
+-			if (messageOrProtocol)
+-               {
+-                    if (InitiateCommand(ind))
+-                         return 1;
+-               }
+-               else
+-               {
+-                    tx_hardError = HARD_ERROR_PROCESSING;
+-                    complete(&xmitSemaphore);
+-               }
+-               set_wakeup_delay(1, reXmitTimer, 0, 0, ACK_RESEND_DELAY);
+-		}
+-	}
+-     return 0;
+-}
+-
+-static void ResetCleanup(void)
+-{
+-     int i;
+-
+-     for (i = 1; i < FIRST_PROTOCOL_IOCTL; ++i)   // do not abort notifications ioctl
+-          ReleaseIoctl(RESULT_ABORTED, i);
+-
+-     AtomicOp(
+-          ackFifo[0] = 0;
+-          ackFifo[1] = 0;
+-          ackFifo[2] = 0;
+-     )
+-
+-	for (i = 0; i < RX_PACKET_MEMORY; ++i)
+-          rx_old_seq[i] = 0;
+-
+-     rx_seq = 0x02;
+-     rx_curProfTempBufUsed = 0;
+-     rx_curProfLossNotified = 0;
+-
+-     tx_seq = 0x02;
+-     tx_unackedWindowStart = 0x02;
+-
+-     complete(&msgSemaphore);
+-
+-     HardErrorCleanupPending = 0;
+-}
+-
+-// the worker thread
+-static int TxThread(void *ptr)
+-{
+-     int i, j, k, l, state;
+-
+-     while (!kthread_should_stop())
+-     {
+-          if (WaitForCompletionWithStopCheck(&txSemaphore))
+-               return 0;
+-
+-          // make sure reset cleanup is done
+-	     if (HardErrorCleanupPending && rx_progress == RXTX_IDLE)
+-               ResetCleanup();
+-
+-          MonitorResetTimeout(&rx_hardError, &rx_resetTimer, &rx_resetFailedCnt);
+-          MonitorResetTimeout(&tx_hardError, &tx_resetTimer, &tx_resetFailedCnt);
+-
+-          // (re-)transmit reset and wait for the acknowledgment
+-          if (LinkLineInException(&tx_hardError) && MonitorReTransmission(&tx_resetReXmitCnt, &tx_resetReXmitTimer, 0, 0))
+-               return 0;
+-
+-          // normal processing takes place only if reset is not going on
+-          // resend unACK'd messages, send new messages
+-          if (LinkStateNormal())
+-               for (i = 0; i < FIRST_PROTOCOL_IOCTL; ++i)
+-               {
+-                    state = SOM_MCU_workRequest[i].state;   // for atomicity during multiple operations
+-                    if (state != RS_IDLE && ioctlDefinition[i].cmd != 0xFF)     // an active ioctl that transmits a command
+-                    {
+-                         if (state >= RS_ACCEPTED)          // is being worked on
+-                         {
+-                              if (check_delay(&SOM_MCU_workRequest[i].ioctlTimeout))     // ioctl has expired
+-                              {
+-                                   if (ReleaseIoctl(RESULT_TIMEOUT,i))
+-                                   {
+-                                        AtomicOp(++tx_timeoutCnt)
+-                                        MarkAsAcked(SOM_MCU_workRequest[i].seq);
+-                                   }
+-                              }
+-
+-                              if (SOM_MCU_workRequest[i].state < RS_ACKED && MonitorReTransmission(&SOM_MCU_workRequest[i].reXmitCnt, &SOM_MCU_workRequest[i].ackTimeout, 1, i))
+-                                   return 0;
+-                         }
+-                         else                               // has not been transmitted yet
+-				     {
+-                              // see if we can advance the unacked window
+-			               for (j = SeqDiff(tx_seq, tx_unackedWindowStart), k = 0, l = tx_unackedBufInd;
+-				               k < j && tx_unackedBuf[l] == 0xFF; ++k, l = l == TX_UNACKED_WINDOW - 1 ? 0 : l + 1);   // go to the 1st not-yet-acknowledged sequence
+-                              if (k)    // can advance the window
+-		                    {
+-			                    j = AddToSequence(tx_unackedWindowStart, k);
+-			                    AtomicOp(
+-				                    tx_unackedWindowStart = j;
+-				                    tx_unackedBufInd = l;
+-			                    )
+-		                    }
+-
+-                              if ((j = SeqDiff(tx_seq, tx_unackedWindowStart)) < TX_UNACKED_WINDOW) // there is room in the unacked window -- accept the ioctl
+-						{
+-					          tx_unackedBuf[GetUnackedIndex(j)] = i;
+-                                   SOM_MCU_workRequest[i].seq = tx_seq;
+-                                   AtomicOp(
+-                                        if (SOM_MCU_workRequest[i].state == RS_SUBMITTED)
+-                                             SOM_MCU_workRequest[i].state = RS_ACCEPTED;
+-                                   )
+-                                   tx_seq = AddToSequence(tx_seq, 1);
+-                                   if (InitiateCommand(i))
+-                                        return 0;
+-                                   SOM_MCU_workRequest[i].reXmitCnt = 1;
+-                                   set_wakeup_delay(1, &SOM_MCU_workRequest[i].ackTimeout, 0, 0, ACK_RESEND_DELAY);
+-                                   set_wakeup_delay(1, &SOM_MCU_workRequest[i].ioctlTimeout, 0, 0, MAX_IOCTL_TIMEOUT);
+-						}
+-					}
+-                    }
+-               }
+-     }
+-     return 0;
+- }
+-
+-static unsigned char res_char = RESET_CHAR;
+-static unsigned char esc_char = ESC_CHAR;
+-static unsigned char stx_char = STX_CHAR;
+-static unsigned char ack_char = ACK_CHAR;
+-static unsigned char res_seq_char = 0x01;
+-
+-// returns 1 if we transmitted an extra ESC, 0 otherwise
+-static u8 TXParseEsc(u8 byte)
+-{
+-     switch (tx_previous_byte)
+-     {
+-          case ESC_PARSER_LOOK_FOR_ESC:
+-               if (byte == ESC_CHAR)
+-               {
+-                    my_tty->ops->write(my_tty, &esc_char, 1);
+-                    tx_previous_byte = ESC_PARSER_ESC_FOUND;
+-                    return 0;
+-               }
+-
+-               if (byte == STX_CHAR)
+-               {
+-                    my_tty->ops->write(my_tty, &esc_char, 1);
+-                    tx_previous_byte = ESC_PARSER_SOLO_ESC;
+-                    return 1;
+-               }
+-
+-               my_tty->ops->write(my_tty, (unsigned char *)&byte, 1);
+-               return 0;
+-
+-          case ESC_PARSER_ESC_FOUND:
+-               tx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-               if (byte == ESC_CHAR || byte == STX_CHAR)
+-               {
+-                    my_tty->ops->write(my_tty, &esc_char, 1);
+-                    return 1;
+-               }
+-
+-               my_tty->ops->write(my_tty, (unsigned char *)&byte, 1);
+-               return 0;
+-
+-          case ESC_PARSER_SOLO_ESC:
+-               my_tty->ops->write(my_tty, (unsigned char *)&byte, 1);
+-               tx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-               return 0;
+-     }
+-
+-     return 0;
+-}
+-
+-// the transmission thread
+-static int XmitThread(void *ptr)
+-{
+-     u8 byte;
+-     int i;
+-     static TxType tx_type = TX_TYPE_NONE;   // what type of packet are we transmitting
+-
+-     while (!kthread_should_stop())
+-     {
+-          // wait for the tty to be able to accept data
+-          if (my_tty->ops->write_room(my_tty) <= 0 && WaitForCompletionWithStopCheck(&canWriteSemaphore))
+-               return 0;
+-
+-          // abort normal processing if protocol-bound processing is pending; indicate to the TX task that we have finished the previous command (or it may hang waiting for it)
+-	     if ((tx_type == TX_TYPE_ACK || tx_type == TX_TYPE_COMMAND) && (LinkLineInException(&rx_hardError) || LinkLineInException(&tx_hardError)))
+-	     {
+-	          tx_progress = RXTX_IDLE;
+-               complete(&msgSemaphore);
+-	     }
+-
+-          // return to normal processing if protocol-bound processing is done; if still doing protocol-bound processing, release the TX task in case it is trying to submit
+-          // a normal command (or it may hang waiting for it)
+-	     if (tx_type != TX_TYPE_ACK && tx_type != TX_TYPE_COMMAND)
+-	     {
+-               if (LinkStateRepaired())
+-	               tx_progress = RXTX_IDLE;
+-               else
+-                    complete(&msgSemaphore);
+-	     }
+-
+-          switch(tx_progress++)
+-          {
+-               case RXTX_IDLE:
+-                    if (tx_previous_byte != ESC_PARSER_LOOK_FOR_ESC)
+-                    {
+-                         my_tty->ops->write(my_tty, &esc_char, 1);
+-                         tx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-                         tx_progress = RXTX_IDLE;
+-                    }
+-                    else
+-			     {
+-                         // look for something to transmit
+-                         if (WaitForCompletionWithStopCheck(&xmitSemaphore))
+-                              return 0;
+-
+-			          tx_type = TX_TYPE_NONE;
+-                         if (LinkLineInException(&rx_hardError))
+-					     tx_type = TX_TYPE_ACK_RESET;
+-				     else if (tx_hardError == HARD_ERROR_PROCESSING)
+-				          tx_type = TX_TYPE_RESET;
+-                         else if (LinkStateNormal())
+-				     {
+-			               if ((i = ack_fifo_out()) != -1)
+-                              {
+-				               tx_type = TX_TYPE_ACK;
+-                                   byte = i;
+-                              }
+-				          else if (!completion_done(&msgSemaphore))
+-				               tx_type = TX_TYPE_COMMAND;
+-				     }
+-
+-                         if (tx_type == TX_TYPE_NONE)
+-                              tx_progress = RXTX_IDLE;
+-				     else
+-                              my_tty->ops->write(my_tty, &stx_char, 1);
+-			     }
+-                    break;
+-
+-               case RXTX_MESSAGE_TYPE:
+-                    switch (tx_type)
+-                    {
+-                         case TX_TYPE_RESET:
+-	                         my_tty->ops->write(my_tty, &res_char, 1);
+-                              tx_crc_value = crc16_byte(0, RESET_CHAR);
+-                              break;
+-
+-                         case TX_TYPE_ACK_RESET:
+-                         case TX_TYPE_ACK:
+-	                         my_tty->ops->write(my_tty, &ack_char, 1);
+-                              tx_crc_value = crc16_byte(0, ACK_CHAR);
+-                              break;
+-
+-                         case TX_TYPE_COMMAND:
+-                              if (TXParseEsc(ioctlDefinition[tx_xmittingInd].msgType))
+-                                   --tx_progress;
+-                              else
+-                                   tx_crc_value = crc16_byte(0, ioctlDefinition[tx_xmittingInd].msgType);
+-                              break;
+-                    }
+-                    break;
+-
+-               case RXTX_SEQ:
+-                    switch (tx_type)
+-                    {
+-                         case TX_TYPE_RESET:
+-                         case TX_TYPE_ACK_RESET:
+-	                         my_tty->ops->write(my_tty, &res_seq_char, 1);
+-                              tx_crc_value = crc16_byte(tx_crc_value, 0x01);
+-                              tx_progress = RXTX_CHKSUM1;
+-                              break;
+-
+-                         case TX_TYPE_ACK:
+-	                         my_tty->ops->write(my_tty, &byte, 1);
+-                              tx_crc_value = crc16_byte(tx_crc_value, byte);
+-                              tx_progress = RXTX_CHKSUM1;
+-                              break;
+-
+-                         case TX_TYPE_COMMAND:
+-                              if (TXParseEsc(SOM_MCU_workRequest[tx_xmittingInd].seq))
+-                                   --tx_progress;
+-                              else
+-                                   tx_crc_value = crc16_byte(tx_crc_value, SOM_MCU_workRequest[tx_xmittingInd].seq);
+-                              break;
+-                    }
+-                    break;
+-
+-               case RXTX_DATA_SIZE:
+-                    byte = SOM_MCU_workRequest[tx_xmittingInd].inSize + 1;
+-                    if (TXParseEsc(byte))
+-                         --tx_progress;
+-                    else
+-                         tx_crc_value = crc16_byte(tx_crc_value, byte);
+-                    break;
+-
+-               case RXTX_CMD:
+-                    if (TXParseEsc(ioctlDefinition[tx_xmittingInd].cmd))
+-                         --tx_progress;
+-                    else
+-                    {
+-                         tx_crc_value = crc16_byte(tx_crc_value, ioctlDefinition[tx_xmittingInd].cmd);
+-                         if (!SOM_MCU_workRequest[tx_xmittingInd].inSize)
+-                              tx_progress = RXTX_CHKSUM1;
+-                         else
+-                              byte = 0;
+-                    }
+-                    break;
+-
+-               case RXTX_DATA:
+-                    if (TXParseEsc(SOM_MCU_workRequest[tx_xmittingInd].inBuffer[byte]))
+-                         --tx_progress;
+-                    else
+-                    {
+-                         tx_crc_value = crc16_byte(tx_crc_value, SOM_MCU_workRequest[tx_xmittingInd].inBuffer[byte]);
+-                         if (++byte < SOM_MCU_workRequest[tx_xmittingInd].inSize)
+-                              --tx_progress;
+-                    }
+-                    break;
+-
+-               case RXTX_CHKSUM1:
+-                    if (TXParseEsc(tx_crc_value & 0xFF))
+-                         --tx_progress;
+-                    break;
+-
+-               case RXTX_CHKSUM2:
+-                    if (TXParseEsc(tx_crc_value >> 8))
+-                         --tx_progress;
+-                    else
+-                    {    // last byte of the packet -- reset the state
+-                         tx_progress = RXTX_IDLE;
+-
+-                         if (tx_type == TX_TYPE_ACK_RESET)  // finished ACK to reset command
+-                         {
+-                              rx_hardError = HARD_ERROR_NONE;
+-                              not_fifo_in_one(PROTOCOL_NOTIFY_RESET_RECEIVED_COMPLETE);
+-                         }
+-
+-				     if (tx_type == TX_TYPE_RESET)      // finished reset command
+-				     {
+-				          AtomicOp(
+-					          if (tx_hardError == HARD_ERROR_PROCESSING)
+-				                    tx_hardError = HARD_ERROR_TRANSMITTED;
+-					     )
+-				     }
+-
+-	                    if (tx_type == TX_TYPE_COMMAND)    // finished a normal command
+-                         {
+-                              AtomicOp(
+-                                   if (SOM_MCU_workRequest[tx_xmittingInd].state == RS_ACCEPTED)
+-                                        SOM_MCU_workRequest[tx_xmittingInd].state = RS_TRANSMITTED;
+-                              )
+-                              complete(&msgSemaphore);
+-                              AtomicOp(++tx_packetsCnt)
+-                         }
+-
+-	                    if (tx_type == TX_TYPE_ACK)        // finished an ack
+-                         {
+-                              AtomicOp(++tx_acksCnt)
+-                         }
+-                    }
+-                    break;
+-          }
+-     }
+-     return 0;
+-}
+-
+-// returns 1 if ioctl processing was aborted by a signal or encountered an error, 0 otherwise
+-static int waitWithSignal(WorkElement *workPtr)
+-{
+-     // wait for the protocol handler to return
+-     wait_for_completion_interruptible(&workPtr->workIndicator);
+-
+-     if (workPtr->state != RS_IDLE)          // we have been interrupted by signal
+-     {
+-//          printk(KERN_NOTICE "IDEXXMCU: interruption by signal.\n\r");
+-          workPtr->state = RS_IDLE;          // maintain coherent state
+-          workPtr->retValue = RESULT_ABORTED;
+-          return 1;
+-     }
+-
+-     // failures require no further work
+-     if (workPtr->retValue != RESULT_SUCCESS)
+-          return 1;
+-
+-     return 0;
+-}
+-
+-void SOM_MCU_SubmitToProto(int ind)
+-{
+-     WorkElement *workPtr = SOM_MCU_workRequest + ind;
+-
+-     if (shuttingDown || !LinkStateNormal() && ind)    // notifications are aborted only on shutdown
+-     {
+-          workPtr->retValue = RESULT_ABORTED;
+-          return;
+-     }
+-
+-     // protocol commands are handled right here
+-     if (ind >= FIRST_PROTOCOL_IOCTL)
+-     {
+-          ProtStat1Cmd *statPtr1;
+-          ProtStat2Cmd *statPtr2;
+-          ProtStat3Cmd *statPtr3;
+-
+-          switch (ind)
+-          {
+-               case PROT_CMD_GET_STATISTICS1:
+-                    statPtr1 = (ProtStat1Cmd *)workPtr->outBuffer;
+-                    AtomicOp(
+-                         statPtr1->rx_timeoutCnt = rx_timeoutCnt;
+-                         statPtr1->rx_brokenCnt = rx_brokenCnt;
+-                         statPtr1->rx_successCnt = rx_successCnt;
+-                         statPtr1->rx_wrongSTXCnt = rx_wrongSTXCnt;
+-                    )
+-                    AtomicOp(
+-                         statPtr1->rx_orphanedCnt = rx_orphanedCnt;
+-                         statPtr1->rx_bugCnt = rx_bugCnt;
+-                         statPtr1->rx_resetCnt = rx_resetCnt;
+-                         statPtr1->rx_resetFailedCnt = rx_resetFailedCnt;
+-                    )
+-                    AtomicOp(
+-                         statPtr1->rx_overflowCnt = rx_overflowCnt;
+-                         statPtr1->rx_framingCnt = rx_framingCnt;
+-                         statPtr1->rx_parityCnt = rx_parityCnt;
+-                         statPtr1->rx_wrongSeqCnt = rx_wrongSeqCnt;
+-                    )
+-                    copy_to_user(workPtr->output, workPtr->outBuffer, sizeof(ProtStat1Cmd));
+-                    break;
+-
+-               case PROT_CMD_GET_STATISTICS2:
+-                    statPtr2 = (ProtStat2Cmd *)workPtr->outBuffer;
+-                    AtomicOp(
+-                         statPtr2->rx_longNotCnt = rx_longNotCnt;
+-                         statPtr2->rx_repeatCnt = rx_repeatCnt;
+-                         statPtr2->rx_ackCnt = rx_ackCnt;
+-                         statPtr2->rx_lostProfileCnt = rx_lostProfileCnt;
+-                    )
+-                    AtomicOp(
+-                         statPtr2->rx_lostPacketCnt = rx_lostPacketCnt;
+-                         statPtr2->tx_noackCnt = tx_noackCnt;
+-                         statPtr2->tx_reXmitCnt = tx_reXmitCnt;
+-                         statPtr2->tx_resetCnt = tx_resetCnt;
+-                    )
+-                    AtomicOp(
+-                         statPtr2->tx_resetFailedCnt = tx_resetFailedCnt;
+-                         statPtr2->tx_packetsCnt = tx_packetsCnt;
+-                         statPtr2->tx_acksCnt = tx_acksCnt;
+-                         statPtr2->RxTxHardCnt = RxTxHardCnt;
+-                    )
+-                    copy_to_user(workPtr->output, workPtr->outBuffer, sizeof(ProtStat2Cmd));
+-                    break;
+-
+-               case PROT_CMD_GET_STATISTICS3:
+-                    statPtr3 = (ProtStat3Cmd *)workPtr->outBuffer;
+-                    AtomicOp(
+-                         statPtr3->rx_fifoOverrunCnt = rx_fifoOverrunCnt;
+-                         statPtr3->notFifoOverrunCnt = notFifoOverrunCnt;
+-                         statPtr3->tx_timeoutCnt = tx_timeoutCnt;
+-                         statPtr3->rx_tempBufCnt = rx_tempBufCnt;
+-                    )
+-                    copy_to_user(workPtr->output, workPtr->outBuffer, sizeof(ProtStat3Cmd));
+-                    break;
+-
+-               case PROT_CMD_ZAP_STATISTICS:
+-                    AtomicOp(
+-                         rx_timeoutCnt = 0;
+-                         rx_brokenCnt = 0;
+-                         rx_successCnt = 0;
+-                         rx_wrongSTXCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         rx_orphanedCnt = 0;
+-                         rx_bugCnt = 0;
+-                         rx_resetCnt = 0;
+-                         rx_resetFailedCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         rx_overflowCnt = 0;
+-                         rx_framingCnt = 0;
+-                         rx_parityCnt = 0;
+-                         rx_wrongSeqCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         rx_longNotCnt = 0;
+-                         rx_repeatCnt = 0;
+-                         rx_ackCnt = 0;
+-                         rx_lostProfileCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         rx_lostPacketCnt = 0;
+-                         tx_noackCnt = 0;
+-                         tx_reXmitCnt = 0;
+-                         tx_resetCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         tx_resetFailedCnt = 0;
+-                         tx_packetsCnt = 0;
+-                         tx_acksCnt = 0;
+-                         RxTxHardCnt = 0;
+-                    )
+-                    AtomicOp(
+-                         rx_fifoOverrunCnt = 0;
+-                         notFifoOverrunCnt = 0;
+-                         tx_timeoutCnt = 0;
+-                         rx_tempBufCnt = 0;
+-                    )
+-                    break;
+-
+-               case PROT_CMD_GET_DRIVER_VERSION:
+-                    copy_to_user(workPtr->output, idexxmcu_proto_c_version, sizeof(idexxmcu_proto_c_version));
+-				break;
+-          }
+-          workPtr->retValue = RESULT_SUCCESS;
+-          return;
+-     }
+-
+-     if (ind == MOTOR_CMD_GOTO_WITH_PROFILE && SOM_MCU_workRequest[MOTOR_CMD_ACCEPT_PROFILE].state != RS_ACKED)
+-     {
+-          workPtr->retValue = RESULT_NO_THREAD;
+-          return;
+-     }
+-
+-     // copy input data into kernel space if needed
+-     if (workPtr->inSize)
+-          copy_from_user(workPtr->inBuffer, workPtr->input, workPtr->inSize);
+-
+-     // indicate we are ready
+-     INIT_COMPLETION(workPtr->workIndicator);
+-     workPtr->state = !ind || ind == MOTOR_CMD_ACCEPT_PROFILE ? RS_ACKED : RS_SUBMITTED;
+-
+-     // if current profile ioctl allow use of the extra buffer
+-     if (ind == MOTOR_CMD_ACCEPT_PROFILE)
+-          rx_curProfTempBufUsed = 0;
+-
+-     // wake up the worker task
+-     complete(&txSemaphore);
+-
+-     // if notification ioctl, wake up the thread that feeds us
+-     if (!ind)
+-          complete(&notHandlerSemaphore);
+-
+-     // wait for the ioctl to be processed
+-     if (waitWithSignal(workPtr))
+-          return;
+-
+-     if (!ind) // notification
+-     {
+-          copy_to_user(workPtr->output, workPtr->outBuffer, MAX_NOTIFICATION_SIZE);
+-          return;
+-     }
+-
+-     if (ind == MOTOR_CMD_ACCEPT_PROFILE)    // current profile -- accumulate in the user space buffer
+-     {
+-          MotorCurProfile kernProf;                              // header to be copied to user space at the end
+-          u32 room = workPtr->outSize - sizeof(kernProf) + sizeof(kernProf.samples); // room available for samples in the user space buffer
+-          u16 *dataPtr = ((MotorCurProfile *)workPtr->output)->samples;              // pointer to the yet unfilled portion of the user space buffer
+-          u16 seq = 1;                                           // sequence counter of the current profile packets
+-          u16 workBuf[PROF_NUM_SAMPLE_PAIRS * 2];                // temporary buffer for decompression of the current profile packets
+-          MotorCurProfCmd *profPtr;                              // view of a current profile packet
+-          int i;                                                 // general purpose counter
+-          u8  numSamples;                                        // number of samples to put in the user buffer from the current packet
+-          int tempBufUsed = 0;     // switch controlling if we are using the extra buffer (accepts one current profile packet while we are busy processing the previous one)
+-
+-          // initialize user space buffer
+-          copy_from_user(&kernProf, workPtr->output, sizeof(kernProf) - sizeof(kernProf.samples));
+-          kernProf.numSamples = 0;
+-          kernProf.numMissedSamples = 0;
+-
+-		// ignore a possible spurious regular buffer caused by the extra buffer intended for the previous invocation of this ioctl and received in between the invocations
+-          if (rx_curProfTempBufUsed && rx_curProfOrder)
+-		{
+-               AtomicOp(
+-                    workPtr->state = RS_ACKED;
+-                    rx_curProfTempBufUsed = 0;
+-			)
+-               if (waitWithSignal(workPtr))
+-                    return;
+-		}
+-
+-          // accumulate sample data from current profile packets
+-          for (;;)
+-          {
+-               // point to either extra buffer or regular buffer from the work request
+-               profPtr = tempBufUsed ? (MotorCurProfCmd *)rx_curProfTempBuf : (MotorCurProfCmd *)workPtr->outBuffer;
+-
+-               // calculate the smaller of packet samples and user buffer room
+-               numSamples = profPtr->numSamples & 0x7F;
+-               if (room < numSamples << 1)
+-                    numSamples = room >> 1;
+-
+-               // maintain user buffer header:
+-               kernProf.numSamples += numSamples;
+-               if (profPtr->seqNum != seq)
+-                    kernProf.numMissedSamples += (PROF_NUM_SAMPLE_PAIRS << 1) * (((u32)profPtr->seqNum | 0x10000) - seq & 0xFFFF);   // sequence numbers can roll over
+-
+-               // reset sequence to start from the current packet
+-               seq = profPtr->seqNum + 1;
+-
+-               // decompress samples
+-               for (i = 0; i < numSamples; ++i)
+-                    workBuf[i] = i & 0x01 ? (u16)(profPtr->data[i/2][1] & 0x0F) << 8 | profPtr->data[i/2][2] : (u16)(profPtr->data[i/2][1] & 0xF0) << 4 | profPtr->data[i/2][0];
+-
+-               if (numSamples)
+-                    copy_to_user(dataPtr, workBuf, numSamples << 1);
+-
+-               dataPtr += numSamples;
+-               room -= numSamples << 1;
+-
+-               if (numSamples != (profPtr->numSamples & 0x7F))   // we did not accept the whole packet because of lack of room
+-               {
+-                    copy_to_user(workPtr->output, &kernProf, sizeof(kernProf) - sizeof(kernProf.samples));
+-                    ReleaseIoctl(RESULT_NO_MEM, ind);
+-                    return;
+-               }
+-
+-               if (profPtr->numSamples & 0x80)                   // last packet in the series
+-               {
+-                    copy_to_user(workPtr->output, &kernProf, sizeof(kernProf) - sizeof(kernProf.samples));
+-                    ReleaseIoctl(RESULT_SUCCESS, ind);
+-                    return;
+-               }
+-
+-			// we are done with the current profile buffer -- allow refill
+-               if (tempBufUsed)
+-			{
+-                    rx_curProfTempBufUsed = 0;
+-                    tempBufUsed = 0;
+-                    if (waitWithSignal(workPtr))
+-                         return;
+-			}
+-               else
+-			{
+-				AtomicOp(
+-                         workPtr->state = RS_ACKED;
+-                         tempBufUsed = rx_curProfTempBufUsed;
+-				)
+-                    if (!tempBufUsed)
+-			     {
+-                         if (waitWithSignal(workPtr))
+-                              return;
+-                         if (tempBufUsed = rx_curProfTempBufUsed)
+-					{
+-						if (rx_curProfOrder)
+-                                   workPtr->state = RS_ACKED;
+-						else
+-                                   tempBufUsed = 0;
+-					}
+-			     }
+-			}
+-          }
+-     }
+-     else if (ioctlDefinition[ind].rspLen)
+-          copy_to_user(workPtr->output, workPtr->outBuffer, ioctlDefinition[ind].rspLen);
+-}
+-
+-// initialize line discipline
+-int SOM_MCU_open(struct tty_struct *ttyPtr)
+-{
+-     int i;
+-     static u8 repeated_init = 0;
+-
+-     // initialize everything to idle state
+-
+-     for (i = 0; i < NUMBER_OF_SOM_IOCTLS; ++i)
+-     {
+-          atomic_set(&SOM_MCU_workRequest[i].onlyOneThread, 0);
+-          if (repeated_init)
+-               INIT_COMPLETION(SOM_MCU_workRequest[i].workIndicator);
+-          else
+-               init_completion(&SOM_MCU_workRequest[i].workIndicator);
+-          SOM_MCU_workRequest[i].state = RS_IDLE;
+-     }
+-
+-     // clear RX packet memory
+-	for (i = 0; i < RX_PACKET_MEMORY; ++i)
+-          rx_old_seq[i] = 0;
+-
+-     rx_progress = RXTX_IDLE;
+-     rx_memoryInd = 0;
+-     rx_seq = 0x02;
+-     rx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-     rx_hardError = HARD_ERROR_NONE;
+-     rx_curProfTempBufUsed = 0;
+-     rx_curProfLossNotified = 0;
+-
+-     tx_progress = RXTX_IDLE;
+-     tx_seq = 0x02;
+-     tx_unackedWindowStart = 0x02;
+-     tx_unackedBufInd = 0;
+-     tx_previous_byte = ESC_PARSER_LOOK_FOR_ESC;
+-     tx_hardError = HARD_ERROR_NONE;
+-
+-     HardErrorCleanupPending = 0;
+-
+-     if (repeated_init)
+-     {
+-          INIT_COMPLETION(notSemaphore);
+-          INIT_COMPLETION(notHandlerSemaphore);
+-          INIT_COMPLETION(txSemaphore);
+-          INIT_COMPLETION(xmitSemaphore);
+-          INIT_COMPLETION(canWriteSemaphore);
+-          INIT_COMPLETION(msgSemaphore);
+-     }
+-     else
+-     {
+-          init_completion(&notSemaphore);
+-          init_completion(&notHandlerSemaphore);
+-          init_completion(&txSemaphore);
+-          init_completion(&xmitSemaphore);
+-          init_completion(&canWriteSemaphore);
+-          init_completion(&msgSemaphore);
+-     }
+-     complete(&msgSemaphore);
+-
+-     notFifo[0] = 0;
+-     notFifo[1] = 0;
+-     notFifo[2] = 0;
+-     ackFifo[0] = 0;
+-     ackFifo[1] = 0;
+-     ackFifo[2] = 0;
+-
+-     my_tty = ttyPtr;    // save the pointer to our tty
+-
+-     shuttingDown = 0;
+-
+-     notTask = kthread_run(NotificationThread, NULL, "%s", "SOM-MCU-notify");
+-     txTask = kthread_run(TxThread, NULL, "%s", "SOM-MCU-tx");
+-     xmitTask = kthread_run(XmitThread, NULL, "%s", "SOM-MCU-xmit");
+-
+-     repeated_init = 1;
+-
+-     if (IS_ERR(notTask) || IS_ERR(txTask) || IS_ERR(xmitTask))
+-          return  IS_ERR(notTask) ? PTR_ERR(notTask) : IS_ERR(txTask) ? PTR_ERR(txTask) : PTR_ERR(xmitTask);
+-     return 0;
+-}
+-
+-int SOM_MCU_hangup(struct tty_struct *tty)
+-{
+-     SOM_MCU_close(tty);
+-     return 0;
+-}
+-
+-// shut down line discipline
+-void	SOM_MCU_close(struct tty_struct * tty)
+-{
+-     int i;
+-
+-     shuttingDown = 1;
+-
+-     for (i = 0; i < NUMBER_OF_SOM_IOCTLS; ++i)
+-          ReleaseIoctl(RESULT_ABORTED, i);
+-
+-     complete(&notSemaphore);
+-     complete(&notHandlerSemaphore);
+-     kthread_stop(notTask);
+-
+-     complete(&txSemaphore);
+-     complete(&msgSemaphore);
+-     kthread_stop(txTask);
+-
+-     complete(&xmitSemaphore);
+-     complete(&canWriteSemaphore);
+-     kthread_stop(xmitTask);
+-}
+diff --git a/drivers/tty/mcu_comm/proto.h b/drivers/tty/mcu_comm/proto.h
+deleted file mode 100644
+index 0ad2ee0..0000000
+--- a/drivers/tty/mcu_comm/proto.h
++++ /dev/null
+@@ -1,276 +0,0 @@
+-#ifndef SOM_MCU_PROTO_H
+-#define SOM_MCU_PROTO_H
+-
+-static const char idexxmcu_proto_h_version[] = "0.2.1-m";
+-
+-#include <linux/irqflags.h>
+-#include <linux/crc16.h>
+-#include <linux/kthread.h>
+-#include <linux/err.h>
+-#include <asm/uaccess.h>
+-
+-#define AtomicOp(expr) {unsigned long flags;	raw_local_irq_save(flags); expr; raw_local_irq_restore(flags);}
+-#define set_delay(tm, min, sec, ms) set_wakeup_delay(0, tm, min, sec, ms)
+-#define check_delay(expr) (!timer_pending(expr))
+-
+-#define PROTO_FIFO_SIZE            64        // size of the FIFO's for ACK's and notifications
+-#define STX_CHAR                   0x75      // start of packet character
+-#define ESC_CHAR                   0x57      // escape character used in masking STX_CHAR occurring in packets
+-#define RESET_CHAR                 0x5A      // protocol reset command
+-#define ACK_CHAR                   0x7A      // acknowledge command
+-#define PACKET_TIMEOUT             60        // maximum duration for a packet reception to occur in ms
+-#define MAX_NOTIFICATION_SIZE      4         // maximum size of a notification
+-#define RESET_TIMEOUT              360       // number of milliseconds in which to complete link reset
+-#define ACK_RESEND_DELAY           120       // number of ms between message re-transmissions if no ACK is received
+-#define MAX_TX_TRIES               3         // maximum number of message send attempts before a tx packet is discarded
+-#define MAX_IOCTL_TIMEOUT          500       // number of ms to wait for IOCTL to complete
+-#define RX_PACKET_MEMORY           4         // number of most recent received sequence-length-crc sets to retain for repeated ACK's
+-#define TX_UNACKED_WINDOW          4         // maximum number of packets to transmit without waiting for an ACK
+-
+-// mapping of ioctl's to SOM-MCU UART transactions
+-typedef struct
+-{
+-     u8             msgType;       // message type, 0xFF for not implemented, 0xFE for any
+-     u8             cmd;           // command to transmit to SOM, 0xFF for none
+-     u8             cmdLen;        // length of data to send with the cmd, 0 for none, 0xFE for variable
+-     u8             rsp;           // command to receive from SOM in response, 0xFF for none, 0xFE for any
+-     u8             rspLen;        // length of data to received with the rsp, 0 for none, 0xFE for variable
+-
+-} SOM_MCU_ioctl_descriptor;
+-
+-// Functional areas of processing distinguished by the comm protocol
+-typedef enum
+-{
+-     MSG_TYPE_INDICATORS = 1,      // buzzer and LED
+-     MSG_TYPE_SYSTEM,              // overall state and behaviour of the MCU
+-     MSG_TYPE_MOTOR,               // motor control
+-     MSG_TYPE_BATTERY,             // battery control
+-     MSG_TYPE_NONE
+-
+-} MessageType;
+-
+-//============================================================================================
+-// Definitions for MSG_TYPE_INDICATORS
+-//============================================================================================
+-typedef enum
+-{
+-     PROTO_IND_CMD_PULSE_TRAIN = 1,     // 1 initiate a train of on/off pulses on LED and/or buzzer
+-     PROTO_IND_CMD_LED_SET,             // 2 set LED to a specific colour or turn it off
+-     PROTO_IND_CMD_BUZZER_SET,          // 3 set buzzer to a specific frequency or turn it off
+-     PROTO_IND_CMD_LED_GET,             // 4 request to provide the current state of the LED
+-     PROTO_IND_CMD_LED_STATUS,          // 5 response to IND_CMD_LED_GET
+-     PROTO_IND_CMD_BUZZER_GET,          // 6 request to provide the current state of the buzzer
+-     PROTO_IND_CMD_BUZZER_STATUS,       // 7 response to IND_CMD_BUZZER_GET
+-     PROTO_IND_CMD_PULSE_TRAIN_GET,     // 8 request to provide current state of pulse train
+-     PROTO_IND_CMD_PULSE_TRAIN_STATUS,  // 9 response to IND_CMD_PULSE_TRAIN_GET
+-     PROTO_IND_CMD_PULSE_TRAIN_DEF_GET, // 10 request to provide current definition of a pulse train
+-     PROTO_IND_CMD_PULSE_TRAIN_DEF,     // 11 response to IND_CMD_PULSE_TRAIN_DEF_GET
+-     PROTO_IND_CMD_PULSE_TRAIN_DEF_SET, // 12 command to change definition of a pulse train
+-
+-} IndicatorCommand;
+-
+-//============================================================================================
+-// Definitions for MSG_TYPE_SYSTEM
+-//============================================================================================
+-typedef enum
+-{
+-     PROTO_SYS_CMD_NOTIFY_BUTTON_UP = 1,          // 1 power button was pressed to wake up
+-     PROTO_SYS_CMD_NOTIFY_CORRUPTION,             // 2 corruption of RAM or code bug detected
+-     PROTO_SYS_CMD_NOTIFY_POWER_UP,               // 3 MCU is cold-starting
+-     PROTO_SYS_CMD_SOM_IS_UP,                     // 4 message from SOM that is has started up
+-     PROTO_SYS_CMD_NOTIFY_POWER_FAIL,             // 5 battery power is failing
+-     PROTO_SYS_CMD_NOTIFY_SHUTDOWN,               // 6 shutting down
+-     PROTO_SYS_CMD_SHUTDOWN,                      // 7 command from SOM to shutdown
+-	PROTO_SYS_CMD_GET_FW_VER,                    // 8 command from SOM to get MCU's firmware version
+-	PROTO_SYS_CMD_FW_NUMBERS,                    // 9 response to SYS_CMD_GET_FW_VER
+-	PROTO_SYS_CMD_NOTIFY_WATCHDOG_RESET,         // 10 watchdog reset occurred
+-	PROTO_SYS_CMD_GET_STATS1,                    // 11 get page 1 of statistics
+-	PROTO_SYS_CMD_STATS1,                        // 12 response to SYS_CMD_GET_STATS1
+-	PROTO_SYS_CMD_GET_STATS2,                    // 13 get page 2 of statistics
+-	PROTO_SYS_CMD_STATS2,                        // 14 response to SYS_CMD_GET_STATS2
+-	PROTO_SYS_CMD_GET_STATS3,                    // 15 get page 3 of statistics
+-	PROTO_SYS_CMD_STATS3,                        // 16 response to SYS_CMD_GET_STATS3
+-	PROTO_SYS_CMD_GET_STATS4,                    // 17 get page 4 of statistics
+-	PROTO_SYS_CMD_STATS4,                        // 18 response to SYS_CMD_GET_STATS4
+-	PROTO_SYS_CMD_ZAP_STATS,                     // 19 clear all statistics counters
+-	PROTO_SYS_CMD_EPROM_PAGE_GET,                // 20 request to get EEPROM page contents
+-	PROTO_SYS_CMD_EPROM_PAGE,                    // 21 response to SYS_CMD_EPROM_PAGE_GET
+-	PROTO_SYS_CMD_EPROM_PAGE_SET,                // 22 request to set EEPROM page contents
+-     PROTO_SYS_CMD_NOTIFY_INVALID_EPROM_PAGE,     // 23 invalid EEPROM page number specified in SYS_CMD_EPROM_PAGE_SET command
+-	PROTO_SYS_CMD_EPROM_PAGE_ERASE,              // 24 request to erase EEPROM page contents
+-	PROTO_SYS_CMD_STACK_SIZES_GET,               // 25 request to provide tasks' used stack sizes
+-	PROTO_SYS_CMD_STACK_SIZES,                   // 26 response to SYS_CMD_STACK_SIZES_GET
+-
+-} SystemCommand;
+-
+-//============================================================================================
+-// Definitions for MSG_TYPE_MOTOR
+-//============================================================================================
+-typedef enum
+-{
+-     PROTO_MOTOR_CMD_CURRENT_PROFILE = 1,              // 1 real time current current profile packet from MCU to SOM
+-     PROTO_MOTOR_CMD_ADC_OFFSET_GET,                   // 2 request to provide ADC idle value
+-     PROTO_MOTOR_CMD_ADC_OFFSET_VALUE,                 // 3 response to MOTOR_CMD_ADC_OFFSET_GET
+-     PROTO_MOTOR_CMD_GOTO,                             // 4 move to home/to snap/up/down
+-     PROTO_MOTOR_CMD_NOTIFY_GOTO_COMPLETE,             // 5 the above command complete
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_INSERTED,             // 6 cartridge has been inserted (switch closed)
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_EJECTED,              // 7 cartridge has been ejected (switch opened)
+-     PROTO_MOTOR_CMD_NOTIFY_HOME_POSITION_REACHED,     // 8 home position hall effect sensor reached
+-     PROTO_MOTOR_CMD_NOTIFY_HOME_POSITION_LEFT,        // 9 home position hall effect sensor left
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_POSITION_REACHED,     // 10 snap position hall effect sensor reached
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_POSITION_LEFT,        // 11 snap position hall effect sensor left
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_DOOR_UP,              // 12 the snap door is up (optical sensor)
+-     PROTO_MOTOR_CMD_NOTIFY_SNAP_DOOR_DOWN,            // 13 the snap door is down (optical sensor)
+-     PROTO_MOTOR_CMD_NOTIFY_MOTOR_STALL_DETECTED,      // 14 stall current detected
+-     PROTO_MOTOR_CMD_SOM_CONTROL_BRAKE,                // 15 direct SOM control motor brake
+-     PROTO_MOTOR_CMD_SOM_CONTROL_POWEROFF,             // 16 direct SOM control motor power off
+-     PROTO_MOTOR_CMD_SOM_CONTROL_CCW,                  // 17 direct SOM control motor counter-clockwise
+-     PROTO_MOTOR_CMD_SOM_CONTROL_CW,                   // 18 direct SOM control motor clockwise
+-     PROTO_MOTOR_CMD_SOM_CONTROL_PWM,                  // 19 direct SOM control set PWM duty cycle and frequency
+-     PROTO_MOTOR_CMD_SOM_CONTROL_MOTOR_DISABLE,        // 20 direct SOM control disable motor
+-     PROTO_MOTOR_CMD_SOM_CONTROL_MOTOR_ENABLE,         // 21 direct SOM control enable motor
+-     PROTO_MOTOR_CMD_SOM_CONTROL_ADC_OFF,              // 22 direct SOM control disable current profile transmission
+-     PROTO_MOTOR_CMD_SOM_CONTROL_ADC_ON,               // 23 direct SOM control enable current profile transmission
+-     PROTO_MOTOR_CMD_STALL_CURRENT_GET,                // 24 request to provide stall current threshold value
+-     PROTO_MOTOR_CMD_STALL_CURRENT,                    // 25 response to MOTOR_CMD_STALL_CURRENT_GET
+-     PROTO_MOTOR_CMD_STALL_CURRENT_SET,                // 26 command to set stall current threshold to a specific value
+-     PROTO_MOTOR_CMD_ALL_PARMS_GET,                    // 27 request to provide of all motor parameters
+-     PROTO_MOTOR_CMD_ALL_PARMS,                        // 28 response to MOTOR_CMD_ALL_PARMS_GET
+-     PROTO_MOTOR_CMD_ALL_PARMS_SET,                    // 29 command to set all motor parameters to specific values
+-     PROTO_MOTOR_CMD_STALL_SAMPLES_GET,                // 30 request to provide stall current minimum samples value
+-     PROTO_MOTOR_CMD_STALL_SAMPLES,                    // 31 response to MOTOR_CMD_STALL_SAMPLES_GET
+-     PROTO_MOTOR_CMD_STALL_SAMPLES_SET,                // 32 command to set stall current minimum samples to a specific value
+-     PROTO_MOTOR_CMD_NO_STALL_CURRENT_GET,             // 33 request to provide no-stall current ADC threshold value
+-     PROTO_MOTOR_CMD_NO_STALL_CURRENT,                 // 34 response to MOTOR_CMD_NO_STALL_CURRENT_GET
+-     PROTO_MOTOR_CMD_NO_STALL_CURRENT_SET,             // 35 command to set no-stall current ADC threshold to a specific value
+-     PROTO_MOTOR_CMD_NO_STALL_SAMPLES_GET,             // 36 request to provide no-stall current minimum samples value
+-     PROTO_MOTOR_CMD_NO_STALL_SAMPLES,                 // 37 response to MOTOR_CMD_NO_STALL_SAMPLES_GET
+-     PROTO_MOTOR_CMD_NO_STALL_SAMPLES_SET,             // 38 command to set no-stall current minimum samples to a specific value
+-     PROTO_MOTOR_CMD_TIMEOUT_SNAP_GET,                 // 39 request to provide snap move timeout value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_SNAP,                     // 40 response to MOTOR_CMD_TIMEOUT_SNAP_GET
+-     PROTO_MOTOR_CMD_TIMEOUT_SNAP_SET,                 // 41 command to set snap move timeout to a specific value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_HOME_GET,                 // 42 request to provide home move timeout value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_HOME,                     // 43 response to MOTOR_CMD_TIMEOUT_HOME_GET
+-     PROTO_MOTOR_CMD_TIMEOUT_HOME_SET,                 // 44 command to set home move timeout to a specific value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_UP_GET,                   // 45 request to provide up move timeout value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_UP,                       // 46 response to MOTOR_CMD_TIMEOUT_UP_GET
+-     PROTO_MOTOR_CMD_TIMEOUT_UP_SET,                   // 47 command to set up move timeout to a specific value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_DOWN_GET,                 // 48 request to provide down move timeout value (seconds)
+-     PROTO_MOTOR_CMD_TIMEOUT_DOWN,                     // 49 response to MOTOR_CMD_TIMEOUT_DOWN_GET
+-     PROTO_MOTOR_CMD_TIMEOUT_DOWN_SET,                 // 50 command to set down move timeout to a specific value (seconds)
+-     PROTO_MOTOR_CMD_MAX_PWM_GET,                      // 51 request to provide full power PWM value (0-1023)
+-     PROTO_MOTOR_CMD_MAX_PWM,                          // 52 response to MOTOR_CMD_MAX_PWM_GET
+-     PROTO_MOTOR_CMD_MAX_PWM_SET,                      // 53 command to set full power PWM to a specific value (0-1023)
+-     PROTO_MOTOR_CMD_FREQ_GET,                         // 54 request to provide PWM frequency value
+-     PROTO_MOTOR_CMD_FREQ,                             // 55 response to MOTOR_CMD_FREQ_GET
+-     PROTO_MOTOR_CMD_FREQ_SET,                         // 56 command to set PWM frequency to a specific value
+-     PROTO_MOTOR_CMD_ACC_PROF_GET,                     // 57 request to provide acceleration profile number (0-5)
+-     PROTO_MOTOR_CMD_ACC_PROF,                         // 58 response to MOTOR_CMD_ACC_PROF_GET
+-     PROTO_MOTOR_CMD_ACC_PROF_SET,                     // 59 command to set acceleration profile to a specific number (0-5)
+-     PROTO_MOTOR_CMD_ACC_STEP_GET,                     // 60 request to provide acceleration profile step value (ms)
+-     PROTO_MOTOR_CMD_ACC_STEP,                         // 61 response to MOTOR_CMD_ACC_STEP_GET
+-     PROTO_MOTOR_CMD_ACC_STEP_SET,                     // 62 command to set acceleration profile step to a specific value (ms)
+-     PROTO_MOTOR_CMD_DEC_PROF_GET,                     // 63 request to provide deceleration profile number (0-5)
+-     PROTO_MOTOR_CMD_DEC_PROF,                         // 64 response to MOTOR_CMD_DEC_PROF_GET
+-     PROTO_MOTOR_CMD_DEC_PROF_SET,                     // 65 command to set deceleration profile to a specific number (0-5)
+-     PROTO_MOTOR_CMD_DEC_STEP_GET,                     // 66 request to provide deceleration profile step value (ms)
+-     PROTO_MOTOR_CMD_DEC_STEP,                         // 67 response to MOTOR_CMD_DEC_STEP_GET
+-     PROTO_MOTOR_CMD_DEC_STEP_SET,                     // 68 command to set deceleration profile step to a specific value (ms)
+-     PROTO_MOTOR_CMD_UP_DIR_GET,                       // 69 request to provide motor control setting for moving up (MotorDiection enum)
+-     PROTO_MOTOR_CMD_UP_DIR,                           // 70 response to MOTOR_CMD_UP_DIR_GET
+-     PROTO_MOTOR_CMD_UP_DIR_SET,                       // 71 command to set motor control setting for moving up to a specific value (MotorDiection enum)
+-     PROTO_MOTOR_CMD_PROFILE_ARRAY_GET,                // 72 command to provide the 6-byte array of acceleration or deceleration profiles
+-     PROTO_MOTOR_CMD_PROFILE_ARRAY,                    // 73 response to MOTOR_CMD_PROFILE_ARRAY_GET
+-     PROTO_MOTOR_CMD_PROFILE_ARRAY_SET,                // 74 command to set the 6-byte array of acceleration or deceleration profiles
+-     PROTO_MOTOR_CMD_ALL_SENSORS_GET,                  // 75 request to provide state of all sensors
+-     PROTO_MOTOR_CMD_ALL_SENSORS,                      // 76 response to MOTOR_CMD_ALL_SENSORS_GET
+-
+-} MotorCommand;
+-
+-//============================================================================================
+-// Definitions for MSG_TYPE_BATTERY
+-//============================================================================================
+-typedef enum
+-{
+-     PROTO_BATT_CMD_NOTIFY_CHARGER_IN = 1,   // 1 charger plugged in
+-     PROTO_BATT_CMD_NOTIFY_CHARGER_OUT,      // 2 charger unplugged
+-     PROTO_BATT_CMD_NOTIFY_100mA,            // 3 charging at 100 mA
+-     PROTO_BATT_CMD_NOTIFY_500mA,            // 4 charging at 500 mA
+-     PROTO_BATT_CMD_NOTIFY_1A,               // 5 charging at 1 A
+-	PROTO_BATT_CMD_GET_STATUS,              // 6 request to get battery status
+-	PROTO_BATT_CMD_STATUS,                  // 7 response to BATT_CMD_GET_STATUS
+-     PROTO_BATT_CMD_NOTIFY_GG_ERROR,         // 8 gas gauge transaction resulted in error
+-	PROTO_BATT_CMD_GET_GG_VERSION,          // 9 request to get gas gauge IC type and firmware version
+-	PROTO_BATT_CMD_GG_VERSION,              // 10 response to BATT_CMD_GET_GG_VERSION
+-
+-// the following are no longer supported, the numbers are reserved for backward compatibility
+-//	PROTO_BATT_CMD_GET_GG_DFI_CHECKSUM,      // 11 request to get gas gauge data flash check sum
+-//	PROTO_BATT_CMD_GG_DFI_CHECKSUM,          // 12 response to BATT_CMD_GET_GG_CHECKSUM
+-//	PROTO_BATT_CMD_GG_DFI_FLASH,             // 13 request to flash data flash "golden image" onto the gas gauge IC
+-//	PROTO_BATT_CMD_NOTIFY_GG_DFI_FLASH_DONE, // 14 data flash "golden image" has been flashed onto the gas gauge IC
+-//	PROTO_BATT_CMD_NOTIFY_GG_DFI_FLASH_ERROR,     // 15 error flashing data flash "golden image" onto the gas gauge IC
+-
+-	PROTO_BATT_CMD_FS_PKT = 16,             // 16 request to process a flashstream packet
+-	PROTO_BATT_CMD_NOTIFY_FS_PKT_STATUS,    // 17 notification of success/failure in processing the last flashstream packet, also signals readiness for the next one
+-	PROTO_BATT_CMD_OVERRIDE_CHARGE_RATE,    // 18 request to override battery charger rate
+-     PROTO_BATT_CMD_NOTIFY_CHARGE_OFF,       // 19 not charging even though charger is plugged in (forced by BATT_CMD_OVERRIDE_CHARGE_RATE)
+-
+-} BatteryCommand;
+-
+-#pragma pack(push, 1)
+-typedef struct      // MOTOR_CMD_CURRENT_PROFILE format
+-{
+-     u16  seqNum;                            // sequence number of this packet in the stream of current profile packets; starts with 1
+-     u8   numSamples;                        // number of samples in this packet in bits 7-0, if bit 8 is set, this is the last packet in the profile
+-#define PROF_NUM_SAMPLE_PAIRS 15             // number of sample pairs in one current profile packet
+-     u8   data[PROF_NUM_SAMPLE_PAIRS][3];    // 2 12-bit samples are packed in 3 bytes
+-
+-} MotorCurProfCmd;
+-#pragma pack(pop)
+-
+-// input packet parser states
+-typedef enum   // the order of definitions in this enum is significant; if changed, bith rx and tx state machines must be changed
+-{
+-     RXTX_IDLE,          // the communications state machine is waiting to start deciphering a message
+-     RXTX_MESSAGE_TYPE,  // message type
+-     RXTX_SEQ,           // sequence Number
+-     RXTX_DATA_SIZE,     // size of the packet's payload
+-     RXTX_CMD,           // command of a particular message type
+-     RXTX_DATA,          // data for the command
+-     RXTX_CHKSUM1,       // first CRC-16 byte
+-     RXTX_CHKSUM2,       // second CRC-16 byte
+-
+-} RxTxState;
+-
+-// hard error processing states
+-typedef enum
+-{
+-     HARD_ERROR_NONE,              // all good
+-     HARD_ERROR_PROCESSING,        // encountered a hard error
+-	HARD_ERROR_TRANSMITTED,       // transmitted reset command
+-     HARD_ERROR_FAILED,            // failed in trying to reset the link after hard error
+-
+-} ProtocolHardErrorState;
+-
+-// ESC and STX parsing states
+-typedef enum
+-{
+-     ESC_PARSER_LOOK_FOR_ESC,      // passing bytes through; ESC_CHAR will be held
+-     ESC_PARSER_ESC_FOUND,         // holding an ESC_CHAR in anticipation of the next byte
+-     ESC_PARSER_SOLO_ESC,          // ESC_CHAR not followed by either ESC_CHAR or STX_CHAR
+-
+-} EscParserState;
+-
+-typedef enum
+-{
+-     TX_TYPE_NONE,       // transmitting reset command
+-     TX_TYPE_RESET,      // transmitting reset command
+-     TX_TYPE_ACK_RESET,  // transmitting an ACK to a reset command
+-     TX_TYPE_ACK,        // transmitting an ACK to a command
+-     TX_TYPE_COMMAND,    // transmitting a command
+-
+-} TxType;
+-
+-extern SOM_MCU_ioctl_descriptor ioctlDefinition[NUMBER_OF_SOM_IOCTLS];
+-
+-#endif    // SOM_MCU_PROTO_H
+diff --git a/drivers/tty/mcu_comm/workArray.h b/drivers/tty/mcu_comm/workArray.h
+deleted file mode 100644
+index ef07aca..0000000
+--- a/drivers/tty/mcu_comm/workArray.h
++++ /dev/null
+@@ -1,87 +0,0 @@
+-#ifndef SOM_MCU_WORK_ARRAY_H
+-#define SOM_MCU_WORK_ARRAY_H
+-
+-static const char idexxmcu_workarray_h_version[] = "0.2.1-m";
+-
+-#include <linux/types.h>
+-#include <linux/completion.h>
+-#include <linux/timer.h>
+-#include <linux/tty.h>
+-#include <asm/atomic.h>
+-#include <linux/idexxmcu_ioctl.h>
+-
+-typedef enum
+-{
+-	RESULT_SUCCESS,
+-	RESULT_NO_ACK,                // no ACK was received, this will also cause a link reset and the notification about it
+-	RESULT_TIMEOUT,               // response from MCU was not received in the prescribed time
+-	RESULT_ABORTED,               // transaction was aborted by link reset or signal
+-	RESULT_NO_MEM,                // output buffer was not large enough
+-	RESULT_NO_THREAD,             // no thread waiting for current profile
+-
+-} ResultCode;
+-
+-typedef enum                       // order of entries in this enum is significant
+-{
+-	RS_IDLE,                      // no consumer for this ioctl
+-	RS_SUBMITTED,                 // ready for work
+-	RS_ACCEPTED,                  // accepted for transmission
+-	RS_TRANSMITTED,               // has been transmitted
+-	RS_ACKED,                     // has been acknowledged
+-
+-} RequestState;
+-
+-typedef struct
+-{
+-	// variables used by the ioctl handler
+-	atomic_t            onlyOneThread;      // mutex to prevent multi-threading on an ioctl
+-	void                *input;   // user space pointer to the data to be transmitted to the MCU, if any; does not need to be initialized if not used
+-	void                *output;  // user space pointer to the data to be received from the MCU, if any; does not need to be initialized if not used
+-	u32                 inSize;   // size of the buffer pointed to by input
+-	u32                 outSize;  // size of the buffer pointed to by output; does not need to be initialized if not used
+-	ResultCode          retValue; // completion status; does not need to be initialized; valid only after return from SOM_MCU_SubmitToProto
+-
+-	// when there is a new ioctl to be performed, do the following in the order described:
+-	//
+-	//   determine the index "ind" into SOM_MCU_workRequest for the ioctl
+-	//
+-	//   prevent more than one thread from using the ioctl by:
+-	//        if (atomic_cmpxchg(&SOMC_MCU_workRequest[ind].onlyOneThread, 0, 1))
+-	//        {
+-	//             return a "busy" error to the caller
+-	//        }
+-	//
+-	//   initialize input, output, and outSize of the SOM_MCU_workRequest element (if needed)
+-	//
+-	//   issue the processing function call:
+-	//        SOM_MCU_SubmitToProto(ind);
+-	//   it will return when the ioctl has been processed -- user space output buffer has been filled and ResultCode set.
+-	//
+-	//   at the very end when no data in SOMC_MCU_workRequest[ind] is needed any more, reset the mutex:
+-	//        atomic_set(&SOM_MCU_workRequest[ind].onlyOneThread, 0);
+-
+-	// variables used by the protocol handler
+-#pragma pack(push, 4)
+-	u8                  inBuffer[MAX_DATA_LENGTH - 1];     // buffer for input data
+-	u8                  outBuffer[MAX_DATA_LENGTH - 1];    // buffer for output data
+-#pragma pack(pop)
+-	struct timer_list ioctlTimeout;                        // holds the time when this ioctl will time out waiting for MCU response
+-	struct timer_list ackTimeout;                          // holds the time when this ioctl will time out waiting for ACK
+-	u8                  reXmitCnt;                         // ACK re-transmit counter
+-	u8                  seq;                               // sequence number used to transmit this packet or 0 if it has not yet been transmitted
+-	struct completion   workIndicator;                     // used to indicate presence/absence of ioctl consumer
+-	RequestState        state;                             // processing state of this ioctl
+-
+-} WorkElement;
+-
+-// all the ioctl's are performed via this array indexed by a value of the SOM_ioctl_cmd type (ioctl_desc.h); it is initialized during module startup
+-extern volatile WorkElement SOM_MCU_workRequest[NUMBER_OF_SOM_IOCTLS];
+-
+-int SOM_MCU_open(struct tty_struct *ttyPtr);
+-void	SOM_MCU_close(struct tty_struct *);
+-int SOM_MCU_hangup(struct tty_struct *tty);
+-void	SOM_MCU_receive_buf(struct tty_struct *, const unsigned char *cp, char *fp, int count);
+-void	SOM_MCU_write_wakeup(struct tty_struct *);
+-void SOM_MCU_SubmitToProto(int ind);
+-
+-#endif    // SOM_MCU_WORK_ARRAY_H
+diff --git a/include/linux/idexxmcu_ioctl.h b/include/linux/idexxmcu_ioctl.h
+index 3eeb2fb..a5a2d53 100644
+--- a/include/linux/idexxmcu_ioctl.h
++++ b/include/linux/idexxmcu_ioctl.h
+@@ -1,7 +1,7 @@
+ #ifndef SOM_MCU_IOCTL_DESC_H
+ #define SOM_MCU_IOCTL_DESC_H
+ 
+-static const char idexxmcu_ioctl_h_version[] = "0.2.1-m";
++static const char idexxmcu_ioctl_h_version[] = "1.1.0";
+ 
+ #ifndef __KERNEL__
+ typedef unsigned char u8;
+@@ -129,7 +129,7 @@ typedef enum
+     BATT_CMD_OBSOLETE2,                          // used to be BATT_CMD_GG_DFI_FLASH,                       // flash data flash "golden image" onto the gas gauge IC
+     BATT_CMD_FS_PKT,                             // request to process a flashstream packet
+     BATT_CMD_OVERRIDE_CHARGE_RATE,               // request to override battery charger rate
+-    BATT_CMD_PLACEHOLDER3,
++    BATT_CMD_RESET_GAS_GAUGE,                    // command causes the gas guage to forget any lernings. reset to golden image.
+     BATT_CMD_PLACEHOLDER4,
+     BATT_CMD_PLACEHOLDER5,
+     BATT_CMD_PLACEHOLDER6,
+@@ -847,6 +847,7 @@ typedef struct
+ #define IDEXX_MCU_BATT_CMD_GET_GG_VERSION              _IOR(IDEXXMCU_PROTO_MAGIC, BATT_CMD_GET_GG_VERSION, idexxmcu_message_t)
+ #define IDEXX_MCU_BATT_CMD_FS_PKT                      _IOW(IDEXXMCU_PROTO_MAGIC, BATT_CMD_FS_PKT, idexxmcu_message_t)
+ #define IDEXX_MCU_BATT_CMD_OVERRIDE_CHARGE_RATE        _IOW(IDEXXMCU_PROTO_MAGIC, BATT_CMD_OVERRIDE_CHARGE_RATE, idexxmcu_message_t)
++#define IDEXX_MCU_BATT_CMD_RESET_GAS_GAUGE             _IO(IDEXXMCU_PROTO_MAGIC, BATT_CMD_RESET_GAS_GAUGE)
+ 
+ // protocol ioctl's
+ #define IDEXX_MCU_PROT_CMD_GET_STATISTICS1             _IOR(IDEXXMCU_PROTO_MAGIC, PROT_CMD_GET_STATISTICS1, idexxmcu_message_t)
+-- 
+1.7.9.5
+

@@ -1,0 +1,107 @@
+From 5ed290e43a6e32a30ae809dc2edf4ca1b73204f6 Mon Sep 17 00:00:00 2001
+From: Mohamed Thalib H <mohamed@e-consystems.com>
+Date: Thu, 22 May 2014 18:54:37 +0530
+Subject: [PATCH 4/8] Changed ECC to HW ECC + added usblp module to
+ walnut_config Signed-off-by: Mohamed Thalib H
+ <mohamed@e-consystems.com>
+
+---
+ arch/arm/configs/walnut_defconfig          |   23 +++++------------------
+ arch/arm/mach-omap2/common-board-devices.c |    1 +
+ 2 files changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/arch/arm/configs/walnut_defconfig b/arch/arm/configs/walnut_defconfig
+index b01269d..f458d35 100644
+--- a/arch/arm/configs/walnut_defconfig
++++ b/arch/arm/configs/walnut_defconfig
+@@ -494,6 +494,7 @@ CONFIG_NEON=y
+ # Userspace binary formats
+ #
+ CONFIG_BINFMT_ELF=y
++CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS=y
+ CONFIG_HAVE_AOUT=y
+ # CONFIG_BINFMT_AOUT is not set
+ # CONFIG_BINFMT_MISC is not set
+@@ -657,7 +658,6 @@ CONFIG_EXTRA_FIRMWARE=""
+ CONFIG_CONNECTOR=y
+ CONFIG_PROC_EVENTS=y
+ CONFIG_MTD=y
+-# CONFIG_MTD_DEBUG is not set
+ # CONFIG_MTD_TESTS is not set
+ # CONFIG_MTD_REDBOOT_PARTS is not set
+ # CONFIG_MTD_CMDLINE_PARTS is not set
+@@ -708,7 +708,6 @@ CONFIG_MTD_CFI_UTIL=y
+ #
+ # CONFIG_MTD_COMPLEX_MAPPINGS is not set
+ # CONFIG_MTD_PHYSMAP is not set
+-# CONFIG_MTD_ARM_INTEGRATOR is not set
+ # CONFIG_MTD_PLATRAM is not set
+ 
+ #
+@@ -728,13 +727,12 @@ CONFIG_MTD_CFI_UTIL=y
+ # CONFIG_MTD_DOC2000 is not set
+ # CONFIG_MTD_DOC2001 is not set
+ # CONFIG_MTD_DOC2001PLUS is not set
++# CONFIG_MTD_DOCG3 is not set
+ CONFIG_MTD_NAND_ECC=y
+ # CONFIG_MTD_NAND_ECC_SMC is not set
+ CONFIG_MTD_NAND=y
+ # CONFIG_MTD_NAND_VERIFY_WRITE is not set
+-CONFIG_MTD_NAND_BCH=y
+-CONFIG_MTD_NAND_ECC_BCH=y
+-CONFIG_MTD_NAND_ONCHIP_ECC=y
++# CONFIG_MTD_NAND_ECC_BCH is not set
+ # CONFIG_MTD_SM_COMMON is not set
+ # CONFIG_MTD_NAND_MUSEUM_IDS is not set
+ # CONFIG_MTD_NAND_GPIO is not set
+@@ -1635,7 +1633,7 @@ CONFIG_MUSB_USE_SYSTEM_DMA_WORKAROUND=y
+ # USB Device Class drivers
+ #
+ # CONFIG_USB_ACM is not set
+-# CONFIG_USB_PRINTER is not set
++CONFIG_USB_PRINTER=m
+ # CONFIG_USB_WDM is not set
+ # CONFIG_USB_TMC is not set
+ 
+@@ -1934,17 +1932,7 @@ CONFIG_MISC_FILESYSTEMS=y
+ # CONFIG_BEFS_FS is not set
+ # CONFIG_BFS_FS is not set
+ # CONFIG_EFS_FS is not set
+-CONFIG_JFFS2_FS=m
+-CONFIG_JFFS2_FS_DEBUG=0
+-CONFIG_JFFS2_FS_WRITEBUFFER=y
+-# CONFIG_JFFS2_FS_WBUF_VERIFY is not set
+-CONFIG_JFFS2_SUMMARY=y
+-# CONFIG_JFFS2_FS_XATTR is not set
+-# CONFIG_JFFS2_COMPRESSION_OPTIONS is not set
+-CONFIG_JFFS2_ZLIB=y
+-# CONFIG_JFFS2_LZO is not set
+-CONFIG_JFFS2_RTIME=y
+-# CONFIG_JFFS2_RUBIN is not set
++# CONFIG_JFFS2_FS is not set
+ CONFIG_UBIFS_FS=m
+ # CONFIG_UBIFS_FS_XATTR is not set
+ # CONFIG_UBIFS_FS_ADVANCED_COMPR is not set
+@@ -2215,7 +2203,6 @@ CONFIG_LZO_COMPRESS=y
+ CONFIG_LZO_DECOMPRESS=y
+ # CONFIG_XZ_DEC is not set
+ # CONFIG_XZ_DEC_BCJ is not set
+-CONFIG_BCH=y
+ CONFIG_HAS_IOMEM=y
+ CONFIG_HAS_IOPORT=y
+ CONFIG_HAS_DMA=y
+diff --git a/arch/arm/mach-omap2/common-board-devices.c b/arch/arm/mach-omap2/common-board-devices.c
+index bcb0c58..d74cc69 100644
+--- a/arch/arm/mach-omap2/common-board-devices.c
++++ b/arch/arm/mach-omap2/common-board-devices.c
+@@ -126,6 +126,7 @@ void __init omap_nand_flash_init(int options, struct mtd_partition *parts,
+ 		nand_data.parts = parts;
+ 		nand_data.nr_parts = nr_parts;
+ 		nand_data.devsize = options;
++		nand_data.ecc_opt = OMAP_ECC_HAMMING_CODE_HW_ROMCODE;
+ 
+ 		printk(KERN_INFO "Registering NAND on CS%d\n", nandcs);
+ 		if (gpmc_nand_init(&nand_data) < 0)
+-- 
+1.7.9.5
+
