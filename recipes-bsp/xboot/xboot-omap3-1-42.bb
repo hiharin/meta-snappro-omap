@@ -5,7 +5,7 @@ SRCREV = "23bf763690219f0eab18c6dd45161bad79980e07"
 PV = "1"
 PR = "42"
 
-SRC_URI = "git:///home/dwest/projects/git/xboot;protocol=git"
+SRC_URI = "git:///home/dwest/projects/git/xboot"
 SRC_URI += "file://0001-HIMAX-lcd-updates-NAND-updates-UART-config-gpio-conf.patch"
 
 S = "${WORKDIR}/git"

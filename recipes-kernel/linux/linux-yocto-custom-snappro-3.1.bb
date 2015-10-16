@@ -47,10 +47,10 @@ SRC_URI += "file://linux-3.1.10_0008-Removed-MCU_COMM-driver-this-driver-is-now-
 SRC_URI += "file://linux-3.1.10_0009-Added-Support-for-USB-Serial-Converter-with-FTDI-Sin.patch"
 SRC_URI += "file://linux-3.1.10_0010-panel-driver-modified-for-gamma-contrast-correction-in-hx8363.patch"
 SRC_URI += "file://linux-3.1.10_0011-Changed-memory-from-221M-to-472M.patch"
-SRC_URI += "file://walnut_defconfig"
+SRC_URI += "file://defconfig"
 
 KBRANCH = "working-branch"
-
+CONFIG_LOCALVERSION = "-idexx-snappro"
 LINUX_VERSION ?= "3.1"
 LINUX_VERSION_EXTENSION ?= "-custom"
 
