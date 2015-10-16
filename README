@@ -62,3 +62,11 @@ II. Misc
 ========
 
 --- replace with specific information about the snappro-omap layer ---
+To build the kernel alone
+bitbake virtual/kernel
+
+To build xboot alone 
+bitbake virtual/bootloader
+
+To build busybox 1.19
+bitbake virtual/busybox
